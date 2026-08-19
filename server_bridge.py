@@ -116,7 +116,7 @@ async function sendBatchToServer(b64Data) {
 async function relayWorker(workerId) {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    let pollInterval = 30;
+    let pollInterval = 40;
 
     while (true) {
         try {
@@ -145,7 +145,7 @@ async function relayWorker(workerId) {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН (2x PIPELINE)";
+                stLocal.innerText = "ПОДКЛЮЧЕН (MEGA TURBO)";
                 stLocal.style.color = "#00ff66";
             }
 
@@ -178,11 +178,13 @@ async function relayWorker(workerId) {
                             packetCount++;
                         }
                         totalBytes += b64Data.length;
-                        if (recvBytes > 0) {
-                            addLog('⚡ [W' + workerId + '] Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                        if (recvBytes > 2048) {
+                            addLog('⚡ [W' + workerId + '] Крупный блок: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
                             pollInterval = 0;
-                        } else {
+                        } else if (recvBytes > 0) {
                             pollInterval = 10;
+                        } else {
+                            pollInterval = 30;
                         }
                         
                         const bElem = document.getElementById('bytes');
@@ -195,7 +197,7 @@ async function relayWorker(workerId) {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    pollInterval = 40;
+                    pollInterval = 50;
                 }
             } else {
                 pollInterval = 120;
@@ -205,12 +207,9 @@ async function relayWorker(workerId) {
     }
 }
 
-addLog("🚀 Пятипоточный Turbo-конвейер v22.0 (5x Pipeline Workers / Max Speed) запущен.", "#00ff66");
+addLog("🚀 Высокоскоростной Turbo-движок v23.0 (Mega-Burst 1080p) запущен.", "#00ff66");
 relayWorker(1);
-setTimeout(() => relayWorker(2), 15);
-setTimeout(() => relayWorker(3), 30);
-setTimeout(() => relayWorker(4), 45);
-setTimeout(() => relayWorker(5), 60);
+setTimeout(() => relayWorker(2), 35);
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -279,7 +278,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v22.0 (5x Pipeline Workers)</title>
+    <title>⚡ Yandex Relay Bridge v23.0 (Mega-Burst 1080p)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -304,7 +303,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[5x Pipeline Workers v22.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Mega-Burst v23.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -518,7 +517,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v20.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v23.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
