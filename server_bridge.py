@@ -462,7 +462,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(65536), timeout=0.5)
+                    data = await asyncio.wait_for(reader.read(262144), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
