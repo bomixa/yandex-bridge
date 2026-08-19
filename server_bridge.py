@@ -39,7 +39,6 @@ function addLog(msg) {
 
 function getProxyUrl() {
     if (cachedProxyUrl) return cachedProxyUrl;
-    // 1. Вычисляем путь внутри прокси Яндекс.Переводчика (turbopages.org)
     let path = window.location.pathname || '';
     path = path.replace(/\\/+$/, '');
     if (path.includes('proxy_u') || path.includes('turbopages.org') || path.includes('translate')) {
@@ -109,15 +108,11 @@ async function relayLoop() {
                         body: payload
                     });
                 } catch(netErr) {
-                    // Резервный маршрут: относительный путь
                     serverResp = await fetch('/api/batch', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: payload
-                    }).catch(e => {
-                        addLog('<span style="color:#ff3344">Ошибка отправки: ' + e.message + '</span>');
-                        return null;
-                    });
+                    }).catch(e => null);
                 }
 
                 if (serverResp && serverResp.ok) {
@@ -136,7 +131,9 @@ async function relayLoop() {
                                 activeSessions.add(res.sid);
                             }
                             packetCount++;
-                            addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + (res.data && res.data !== 'EMPTY' ? ' ⚡ ' + res.data.length + 'b' : ''));
+                            if (res.data && res.data !== "EMPTY") {
+                                addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + ' ⚡ ' + res.data.length + 'b');
+                            }
                         }
                         totalBytes += payload.length;
                         const bElem = document.getElementById('bytes');
@@ -145,11 +142,7 @@ async function relayLoop() {
                         if (pkElem) pkElem.innerText = packetCount;
                         const sessElem = document.getElementById('sess-count');
                         if (sessElem) sessElem.innerText = activeSessions.size;
-                    } catch(jsonErr) {
-                        addLog('<span style="color:#ff3344">Ошибка разбора ответа: ' + jsonErr.message + '</span>');
-                    }
-                } else if (serverResp) {
-                    addLog('<span style="color:#ff3344">Сервер ответил HTTP ' + serverResp.status + ' (' + proxyUrl + ')</span>');
+                    } catch(jsonErr) { }
                 }
             }
         } catch (e) {
@@ -159,7 +152,7 @@ async function relayLoop() {
     }
 }
 
-addLog("Транспортный движок туннеля v6.3 запущен.");
+addLog("Транспортный движок туннеля v6.5 запущен.");
 relayLoop();
 """
 
@@ -223,7 +216,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.3]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.5]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -310,10 +303,11 @@ class YandexRenderBridgeServer:
                 addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
                 port = int(info['port'])
                 await self.open_connection(sid, addr, port)
-                return {"sid": sid, "data": "OK", "type": "connect"}
+                # Возвращаем EMPTY, чтобы не отправлять текстовые строки в сокет клиента
+                return {"sid": sid, "data": "EMPTY", "type": "connect"}
             except Exception as e:
                 logging.error(f"[{sid}] Connect parse error: {e}")
-                return {"sid": sid, "data": "ERROR", "type": "connect"}
+                return {"sid": sid, "data": "EOF", "type": "connect"}
 
         elif p_type == "data" and payload:
             if sid in self.sessions and self.sessions[sid]['active']:
@@ -349,12 +343,12 @@ class YandexRenderBridgeServer:
         return {"sid": sid, "data": resp_data, "type": p_type}
 
     async def open_connection(self, sid, addr, port):
-        """Исходящее TCP соединение в большой интернет"""
+        """Исходящее TCP соединение во внешний интернет с хоста Render"""
         try:
             logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
             r, w = await asyncio.wait_for(
                 asyncio.open_connection(addr, port, family=socket.AF_INET),
-                timeout=12.0
+                timeout=10.0
             )
             self.sessions[sid] = {
                 'w': w,
@@ -372,7 +366,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(32768), timeout=1.0)
+                    data = await asyncio.wait_for(reader.read(32768), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -390,10 +384,10 @@ class YandexRenderBridgeServer:
 
     async def session_cleaner(self):
         while True:
-            await asyncio.sleep(20)
+            await asyncio.sleep(15)
             now = time.time()
             async with self.buffer_lock:
-                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 60]
+                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 45]
                 for sid in to_del:
                     if sid in self.sessions:
                         try:
@@ -418,7 +412,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v6.3 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v6.5 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
