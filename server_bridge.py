@@ -205,9 +205,12 @@ async function relayWorker(workerId) {
     }
 }
 
-addLog("🚀 Двухпоточный Turbo-конвейер v20.0 (1080p/4K Ultra-Speed) запущен.", "#00ff66");
+addLog("🚀 Пятипоточный Turbo-конвейер v22.0 (5x Pipeline Workers / Max Speed) запущен.", "#00ff66");
 relayWorker(1);
-setTimeout(() => relayWorker(2), 25);
+setTimeout(() => relayWorker(2), 15);
+setTimeout(() => relayWorker(3), 30);
+setTimeout(() => relayWorker(4), 45);
+setTimeout(() => relayWorker(5), 60);
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -276,7 +279,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v20.0 (1080p/4K Ultra-Speed)</title>
+    <title>⚡ Yandex Relay Bridge v22.0 (5x Pipeline Workers)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -301,7 +304,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[1080p/4K Ultra-Speed v20.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[5x Pipeline Workers v22.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -468,7 +471,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(524288), timeout=0.5)
+                    data = await asyncio.wait_for(reader.read(1048576), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -499,7 +502,7 @@ class YandexRenderBridgeServer:
                         del self.sessions[sid]
 
     async def run(self):
-        app = web.Application(client_max_size=30*1024*1024)
+        app = web.Application(client_max_size=50*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
         app.router.add_route('*', '/api/ip', self.handle_get_ip)
