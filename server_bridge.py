@@ -18,9 +18,123 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
+# Чистый JavaScript код ретранслятора
+JS_ENGINE_CODE = """
+let responseQueue = [];
+let totalBytes = 0;
+let packetCount = 0;
+let activeSessions = new Set();
+
+function addLog(msg) {
+    const log = document.getElementById('log');
+    if (!log) return;
+    const d = document.createElement('div');
+    d.className = 'packet';
+    d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
+    log.appendChild(d);
+    if (log.childNodes.length > 50) log.removeChild(log.firstChild);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function testInternet() {
+    const res = document.getElementById('test-res');
+    if (res) res.innerText = "Checking...";
+    try {
+        const r = await fetch('https://api.ipify.org?format=json');
+        const data = await r.json();
+        if (res) {
+            res.innerHTML = '<span style="color:#00ff66">✓ IP: <b>' + data.ip + '</b></span>';
+        }
+    } catch(e) {
+        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Error</span>';
+    }
+}
+
+async function relayLoop() {
+    const indLocal = document.getElementById('ind-local');
+    const stLocal = document.getElementById('st-local');
+    const proxyForm = document.getElementById('proxy_form');
+    let proxyUrl = proxyForm ? proxyForm.action : '/api/batch';
+    if (!proxyUrl || proxyUrl === "") proxyUrl = "/api/batch";
+
+    while (true) {
+        try {
+            // Опрос локального клиента
+            const localResp = await fetch('http://localhost:8888/exchange', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(responseQueue)
+            }).catch(() => null);
+
+            if (!localResp || !localResp.ok) {
+                if (indLocal) indLocal.className = 'indicator error';
+                if (stLocal) {
+                    stLocal.innerText = "ОФЛАЙН";
+                    stLocal.style.color = "#ff3344";
+                }
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+            }
+
+            if (indLocal) indLocal.className = 'indicator active';
+            if (stLocal) {
+                stLocal.innerText = "ПОДКЛЮЧЕН";
+                stLocal.style.color = "#00ff66";
+            }
+            responseQueue = [];
+
+            const tasks = await localResp.json();
+
+            if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
+                const payload = "p=" + encodeURIComponent(btoa(JSON.stringify(tasks)));
+                const serverResp = await fetch(proxyUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: payload
+                });
+
+                if (serverResp.ok) {
+                    const text = await serverResp.text();
+                    let b64 = text;
+                    if (text.includes('id="turbo_data">')) {
+                        b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
+                    }
+                    const results = JSON.parse(atob(b64));
+                    for (let res of results) {
+                        if (res.data && res.data !== "EMPTY") {
+                            responseQueue.push(res);
+                        }
+                        if (res.sid && res.sid !== "IDLE") {
+                            activeSessions.add(res.sid);
+                        }
+                        packetCount++;
+                        addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + (res.data && res.data !== 'EMPTY' ? ' ⚡ ' + res.data.length + 'b' : ''));
+                    }
+                    totalBytes += payload.length;
+                    const bElem = document.getElementById('bytes');
+                    if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
+                    const pkElem = document.getElementById('pk-count');
+                    if (pkElem) pkElem.innerText = packetCount;
+                    const sessElem = document.getElementById('sess-count');
+                    if (sessElem) sessElem.innerText = activeSessions.size;
+                }
+            }
+        } catch (e) {
+            console.error("Relay loop error:", e);
+        }
+        await new Promise(r => setTimeout(r, 40));
+    }
+}
+
+addLog("Транспортный движок туннеля запущен.");
+relayLoop();
+"""
+
+JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
+
+
 class YandexRenderBridgeServer:
     def __init__(self):
-        # sid -> {'w': writer, 'r': reader, 'buffer': bytearray(), 'active': bool, 'last_poll': float}
         self.sessions = {}
         self.buffer_lock = asyncio.Lock()
         self.total_bytes_rx = 0
@@ -42,49 +156,46 @@ class YandexRenderBridgeServer:
         }, headers=cors)
 
     async def get_dashboard(self, request):
-        """Дашборд и движок ретрансляции, адаптированный под проксирование Яндекс.Переводчика"""
-        html = """<!DOCTYPE html>
-<html lang="ru">
+        """Главная веб-страница, защищенная от автоперевода Яндекс.Переводчиком"""
+        html = f"""<!DOCTYPE html>
+<html lang="en" translate="no" class="notranslate">
 <head>
     <meta charset="UTF-8">
+    <meta name="google" content="notranslate">
+    <meta name="yandex" content="notranslate">
+    <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>⚡ Yandex Relay Bridge</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }
-        .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #1a2230; margin-bottom: 15px; }
-        h1 { font-size: 18px; color: #fff; font-weight: 600; }
-        h1 span { color: #00ff66; font-size: 13px; font-weight: normal; margin-left: 8px; }
-        .grid { display: grid; grid-template-columns: 1fr 320px; gap: 15px; }
-        @media(max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-        #log { background: #020305; border: 1px solid #161e2b; height: 500px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; }
-        .card { background: #0e131d; border: 1px solid #1a2332; padding: 16px; border-radius: 6px; }
-        .packet { border-bottom: 1px solid #141b27; padding: 4px 0; color: #8fa3bf; word-break: break-all; }
-        .packet b { color: #00ff66; }
-        .packet .time { color: #506177; font-size: 11px; margin-right: 5px; }
-        .indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #555; margin-right: 8px; }
-        .active { background: #00ff66; box-shadow: 0 0 8px #00ff66; }
-        .error { background: #ff3344; box-shadow: 0 0 8px #ff3344; }
-        .stat { margin-bottom: 12px; font-size: 13px; color: #ccd6e0; display: flex; justify-content: space-between; }
-        .stat b { color: #00ff66; }
-        button { background: #00ff66; color: #000; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: 700; width: 100%; margin-top: 8px; transition: 0.2s; }
-        button:hover { background: #00cc52; }
-        .unlock-btn { display: none; background: #ff3344; color: #fff; padding: 12px; text-align: center; text-decoration: none; font-weight: bold; border-radius: 4px; margin-bottom: 12px; font-size: 12px; animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
+        .header {{ display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #1a2230; margin-bottom: 15px; }}
+        h1 {{ font-size: 18px; color: #fff; font-weight: 600; }}
+        h1 span {{ color: #00ff66; font-size: 13px; font-weight: normal; margin-left: 8px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 320px; gap: 15px; }}
+        @media(max-width: 800px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+        #log {{ background: #020305; border: 1px solid #161e2b; height: 500px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; }}
+        .card {{ background: #0e131d; border: 1px solid #1a2332; padding: 16px; border-radius: 6px; }}
+        .packet {{ border-bottom: 1px solid #141b27; padding: 4px 0; color: #8fa3bf; word-break: break-all; }}
+        .packet b {{ color: #00ff66; }}
+        .packet .time {{ color: #506177; font-size: 11px; margin-right: 5px; }}
+        .indicator {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #555; margin-right: 8px; }}
+        .active {{ background: #00ff66; box-shadow: 0 0 8px #00ff66; }}
+        .error {{ background: #ff3344; box-shadow: 0 0 8px #ff3344; }}
+        .stat {{ margin-bottom: 12px; font-size: 13px; color: #ccd6e0; display: flex; justify-content: space-between; }}
+        .stat b {{ color: #00ff66; }}
+        button {{ background: #00ff66; color: #000; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: 700; width: 100%; margin-top: 8px; transition: 0.2s; }}
+        button:hover {{ background: #00cc52; }}
     </style>
 </head>
-<body>
+<body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.2]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
-    <!-- Скрытая ссылка для автоматического вычисления URL Яндекс-прокси -->
-    <a id="proxy_path" href="/api/batch" style="display:none"></a>
-
-    <a id="unlock_btn" href="http://127.0.0.1:8888/exchange" target="_blank" class="unlock-btn">
-        ⚠️ НАЖМИТЕ ЗДЕСЬ ДЛЯ РАЗРЕШЕНИЯ ДОСТУПА К ЛОКАЛЬНОМУ КЛИЕНТУ
-    </a>
+    <!-- Скрытая форма для вычисления прокси-пути через Яндекс -->
+    <form id="proxy_form" action="/api/batch" method="POST" style="display:none"></form>
 
     <div class="grid">
         <div id="log"></div>
@@ -102,128 +213,9 @@ class YandexRenderBridgeServer:
         </div>
     </div>
 
-    <script>
-        let responseQueue = [];
-        let totalBytes = 0;
-        let packetCount = 0;
-        let activeSessions = new Set();
-        const log = document.getElementById('log');
-        const indLocal = document.getElementById('ind-local');
-        const stLocal = document.getElementById('st-local');
-        const unlockBtn = document.getElementById('unlock_btn');
-
-        function addLog(msg) {
-            const d = document.createElement('div');
-            d.className = 'packet';
-            d.innerHTML = `<span class="time">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
-            log.appendChild(d);
-            if (log.childNodes.length > 50) log.removeChild(log.firstChild);
-            log.scrollTop = log.scrollHeight;
-        }
-
-        async function testInternet() {
-            const res = document.getElementById('test-res');
-            res.innerText = "Проверка...";
-            try {
-                const r = await fetch('https://api.ipify.org?format=json');
-                const data = await r.json();
-                res.innerHTML = `<span style="color:#00ff66">✓ IP Сервера: <b>${data.ip}</b></span>`;
-            } catch(e) {
-                res.innerHTML = `<span style="color:#ff3344">✗ Ошибка внешнего IP</span>`;
-            }
-        }
-
-        // Обработка данных, полученных от локального клиента
-        window.handleClientTasks = async function(tasks) {
-            indLocal.className = 'indicator active';
-            stLocal.innerText = "ПОДКЛЮЧЕН";
-            stLocal.style.color = "#00ff66";
-            unlockBtn.style.display = 'none';
-
-            if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
-                const proxyAnchor = document.getElementById('proxy_path');
-                const proxyUrl = proxyAnchor ? proxyAnchor.href : '/api/batch';
-                
-                try {
-                    const encodedPayload = encodeURIComponent(btoa(JSON.stringify(tasks)));
-                    const serverResp = await fetch(proxyUrl + (proxyUrl.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: 'p=' + encodedPayload
-                    });
-
-                    if (serverResp.ok) {
-                        const htmlText = await serverResp.text();
-                        if (htmlText.includes('id="turbo_data">')) {
-                            const rawB64 = htmlText.split('id="turbo_data">')[1].split('</script>')[0].trim();
-                            const results = JSON.parse(atob(rawB64));
-                            
-                            responseQueue = [];
-                            for (let res of results) {
-                                if (res.data && res.data !== "EMPTY") {
-                                    responseQueue.push(res);
-                                }
-                                if (res.sid && res.sid !== "IDLE") {
-                                    activeSessions.add(res.sid);
-                                }
-                                packetCount++;
-                                addLog(`<b>${res.sid}</b> | ${res.type || 'data'} ${res.data && res.data !== 'EMPTY' ? '⚡ ' + res.data.length + 'b' : ''}`);
-                            }
-                            totalBytes += encodedPayload.length;
-                            document.getElementById('bytes').innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                            document.getElementById('pk-count').innerText = packetCount;
-                            document.getElementById('sess-count').innerText = activeSessions.size;
-                        }
-                    }
-                } catch(e) {
-                    console.error("Server relay error:", e);
-                }
-            }
-        };
-
-        async function relayLoop() {
-            // 1. Сначала пробуем Fetch с поддержкой Private Network Access
-            try {
-                const sendBody = JSON.stringify(responseQueue);
-                responseQueue = [];
-                const localResp = await fetch('http://127.0.0.1:8888/exchange', {
-                    method: 'POST',
-                    mode: 'cors',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: sendBody
-                }).catch(() => null);
-
-                if (localResp && localResp.ok) {
-                    const tasks = await localResp.json();
-                    await window.handleClientTasks(tasks);
-                    setTimeout(relayLoop, 40);
-                    return;
-                }
-            } catch(e) { }
-
-            // 2. Если Fetch заблокирован браузером (PNA), используем JSONP как резерв
-            try {
-                const script = document.createElement('script');
-                const q = encodeURIComponent(JSON.stringify(responseQueue));
-                responseQueue = [];
-                script.src = `http://127.0.0.1:8888/exchange?callback=handleClientTasks&data=${q}&t=${Date.now()}`;
-                
-                script.onerror = () => {
-                    indLocal.className = 'indicator error';
-                    stLocal.innerText = "ОФЛАЙН";
-                    stLocal.style.color = "#ff3344";
-                    unlockBtn.style.display = 'block';
-                };
-                
-                document.body.appendChild(script);
-                setTimeout(() => { script.remove(); }, 1000);
-            } catch(e) { }
-
-            setTimeout(relayLoop, 150);
-        }
-
-        addLog("Транспортный движок моста запущен.");
-        relayLoop();
+    <!-- Защищенный запуск JavaScript через Base64 без возможности перевода -->
+    <script translate="no" class="notranslate">
+        eval(decodeURIComponent(escape(atob("{JS_BASE64}"))));
     </script>
 </body>
 </html>"""
@@ -240,7 +232,6 @@ class YandexRenderBridgeServer:
             return web.Response(headers=cors)
 
         try:
-            # Читаем form-data 'p' или querystring
             b64_payload = ""
             if request.method == "POST":
                 post_data = await request.post()
@@ -267,7 +258,6 @@ class YandexRenderBridgeServer:
                 results.append(res)
 
             resp_b64 = base64.b64encode(json.dumps(results).encode()).decode()
-            # Оборачиваем в <script id="turbo_data"> чтобы Яндекс.Переводчик не искажал Base64
             res_html = f'<html><body><script id="turbo_data">{resp_b64}</script></body></html>'
             return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
@@ -315,7 +305,6 @@ class YandexRenderBridgeServer:
                 del self.sessions[sid]
                 return {"sid": sid, "data": "EOF", "type": "close"}
 
-        # Проверяем буфер ответов для этой сессии
         if sid in self.sessions:
             async with self.buffer_lock:
                 self.sessions[sid]['last_poll'] = time.time()
@@ -330,7 +319,7 @@ class YandexRenderBridgeServer:
         return {"sid": sid, "data": resp_data, "type": p_type}
 
     async def open_connection(self, sid, addr, port):
-        """Открытие исходящего TCP соединения во внешний интернет"""
+        """Исходящее соединение во внешний интернет с хоста Render"""
         try:
             logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
             r, w = await asyncio.wait_for(
@@ -350,7 +339,6 @@ class YandexRenderBridgeServer:
             logging.error(f"[-] [{sid}] Connection failed ({addr}:{port}): {e}")
 
     async def read_remote(self, sid, reader):
-        """Чтение данных от удаленного хоста в буфер"""
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
@@ -371,7 +359,6 @@ class YandexRenderBridgeServer:
                 self.sessions[sid]['active'] = False
 
     async def session_cleaner(self):
-        """Очистка старых сессий"""
         while True:
             await asyncio.sleep(20)
             now = time.time()
@@ -400,7 +387,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v6.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v6.2 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
