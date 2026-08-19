@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import time
+import uuid
 from aiohttp import web, ClientSession, ClientTimeout
 
 LISTEN_PORT = int(os.environ.get("PORT", 8181))
@@ -23,6 +24,7 @@ let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
+let chunkBuffers = {};
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -56,7 +58,7 @@ function extractTurboPayload(text) {
     if (text.includes('name="turbo_payload" content="')) {
         return text.split('name="turbo_payload" content="')[1].split('"')[0].trim();
     }
-    // 2. Поиск в textarea (защищено от перевода)
+    // 2. Поиск в textarea
     if (text.includes('id="turbo_area">')) {
         return text.split('id="turbo_area">')[1].split('</textarea>')[0].trim();
     }
@@ -105,68 +107,60 @@ async function sendBatchToServer(b64Data) {
     const endpoints = getCandidateEndpoints();
     let lastError = "";
 
+    // Мелкие куски (до 700 байт) отправляем за 1 GET запрос
+    const CHUNK_LEN = 700;
+    const cid = Math.random().toString(36).substring(2, 9);
+    const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
+
     for (let ep of endpoints) {
-        // Попытка 1: Form-Urlencoded POST (100% проходит через Яндекс.Переводчик)
         try {
-            const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'p=' + encodeURIComponent(b64Data),
-                priority: 'high'
-            });
-            if (postResp && postResp.ok) {
-                const text = await postResp.text();
-                let payload = extractTurboPayload(text);
-                if (payload) {
-                    return { ok: true, payload: payload };
-                }
-            }
-        } catch(postErr) { }
-
-        // Попытка 2: Raw Text POST
-        try {
-            const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain' },
-                body: b64Data,
-                priority: 'high'
-            });
-            if (postResp && postResp.ok) {
-                const text = await postResp.text();
-                let payload = extractTurboPayload(text);
-                if (payload) {
-                    return { ok: true, payload: payload };
-                }
-            }
-        } catch(postErr2) { }
-
-        // Попытка 3: GET Запрос
-        try {
+            let finalPayload = "";
             let sep = ep.includes('?') ? '&' : '?';
-            let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
-            const getResp = await fetch(targetUrl, { priority: 'high' });
-            if (getResp && getResp.ok) {
-                const text = await getResp.text();
-                let payload = extractTurboPayload(text);
-                if (payload) {
-                    return { ok: true, payload: payload };
+
+            // Если пакет маленький (1 кусок)
+            if (totalChunks <= 1) {
+                let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
+                const resp = await fetch(targetUrl, { priority: 'high' });
+                if (resp && resp.ok) {
+                    const text = await resp.text();
+                    finalPayload = extractTurboPayload(text);
+                } else if (resp) {
+                    lastError = "HTTP " + resp.status;
                 }
-            } else if (getResp) {
-                lastError = "HTTP " + getResp.status;
+            } else {
+                // Если пакет большой (дробим на микро-чанки по 700 байт для Яндекс.Переводчика)
+                for (let i = 0; i < totalChunks; i++) {
+                    let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
+                    let targetUrl = ep + sep + 'cid=' + cid + '&idx=' + i + '&total=' + totalChunks + '&p=' + encodeURIComponent(slice) + '&t=' + Date.now();
+                    const resp = await fetch(targetUrl, { priority: 'high' });
+                    if (resp && resp.ok) {
+                        const text = await resp.text();
+                        if (i === totalChunks - 1) {
+                            finalPayload = extractTurboPayload(text);
+                        }
+                    } else if (resp) {
+                        lastError = "HTTP " + resp.status;
+                        break;
+                    }
+                }
             }
-        } catch(getErr) {
+
+            if (finalPayload) {
+                return { ok: true, payload: finalPayload };
+            }
+        } catch (getErr) {
             lastError = getErr.message;
         }
     }
-    return { ok: false, error: lastError || "Не удалось распаковать ответ" };
+    return { ok: false, error: lastError || "Ошибка связи" };
 }
 
-async function strictInOrderStreamEngine() {
+async function yandexMicroChunkEngine() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
     let pollInterval = 10;
 
-    addLog("🚀 Яндекс.Транслятор Safe-движок v27.0 (Anti-Corruption Payload) запущен.", "#00ff66");
+    addLog("🚀 Яндекс.Транслятор v28.0 (Micro-Chunk Safe Transport) запущен.", "#00ff66");
 
     while (true) {
         try {
@@ -238,17 +232,17 @@ async function strictInOrderStreamEngine() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    pollInterval = 30;
+                    pollInterval = 25;
                 }
             } else {
-                pollInterval = 80;
+                pollInterval = 60;
             }
         } catch (e) { }
         await new Promise(r => setTimeout(r, pollInterval));
     }
 }
 
-strictInOrderStreamEngine();
+yandexMicroChunkEngine();
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -258,6 +252,7 @@ class YandexRenderBridgeServer:
     def __init__(self):
         self.sessions = {}
         self.pending_buffers = {}
+        self.chunk_assembler = {}  # cid -> {'chunks': {}, 'total': N, 'time': t}
         self.buffer_lock = asyncio.Lock()
         self.total_bytes_rx = 0
         self.total_bytes_tx = 0
@@ -334,7 +329,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v27.0 (Yandex-Safe)</title>
+    <title>⚡ Yandex Relay Bridge v28.0 (Micro-Chunk Safe)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -359,7 +354,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Yandex-Safe v27.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Micro-Chunk v28.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -400,28 +395,27 @@ class YandexRenderBridgeServer:
             return web.Response(headers=cors)
 
         try:
-            b64_payload = ""
-            if request.method == "POST":
-                try:
-                    post_data = await request.post()
-                    if "p" in post_data:
-                        b64_payload = post_data.get("p")
-                except:
-                    pass
+            cid = request.query.get("cid")
+            idx = request.query.get("idx")
+            total = request.query.get("total")
+            b64_payload = request.query.get("p", "")
 
-                if not b64_payload:
-                    try:
-                        raw_body = await request.text()
-                        if raw_body.startswith("p="):
-                            from urllib.parse import unquote
-                            b64_payload = unquote(raw_body[2:])
-                        elif raw_body and not raw_body.startswith("{") and not raw_body.startswith("["):
-                            b64_payload = raw_body.strip()
-                    except:
-                        pass
+            # Сборка многосегментного микро-чанка
+            if cid and idx is not None and total is not None:
+                idx = int(idx)
+                total = int(total)
+                if cid not in self.chunk_assembler:
+                    self.chunk_assembler[cid] = {'chunks': {}, 'total': total, 'time': time.time()}
+                self.chunk_assembler[cid]['chunks'][idx] = b64_payload
 
-            if not b64_payload:
-                b64_payload = request.query.get("p")
+                if len(self.chunk_assembler[cid]['chunks']) == total:
+                    full_p = "".join(self.chunk_assembler[cid]['chunks'][i] for i in range(total))
+                    del self.chunk_assembler[cid]
+                    b64_payload = full_p
+                else:
+                    # Промежуточный чанк принят
+                    res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
+                    return web.Response(text=res_html, content_type='text/html', headers=cors)
 
             if not b64_payload:
                 res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
@@ -565,6 +559,10 @@ class YandexRenderBridgeServer:
                         except:
                             pass
                         del self.sessions[sid]
+                # Очистка устаревших чанков
+                expired_cids = [c for c, obj in self.chunk_assembler.items() if now - obj['time'] > 20]
+                for c in expired_cids:
+                    del self.chunk_assembler[c]
 
     async def run(self):
         app = web.Application(client_max_size=50*1024*1024)
@@ -583,7 +581,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v27.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v28.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
