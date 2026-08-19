@@ -59,7 +59,7 @@ async function testInternet() {
         let ipUrl = ep.replace('/api/batch', '/api/ip');
         let sep = ipUrl.includes('?') ? '&' : '?';
         try {
-            const r = await fetch(ipUrl + sep + 't=' + Date.now());
+            const r = await fetch(ipUrl + sep + 't=' + Date.now(), { priority: 'high' });
             if (r && r.ok) {
                 const text = await r.text();
                 let b64 = text;
@@ -86,7 +86,9 @@ async function sendBatchToServer(b64Data) {
             const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'text/plain' },
-                body: b64Data
+                body: b64Data,
+                priority: 'high',
+                keepalive: true
             });
             if (postResp && postResp.ok) {
                 workingEndpoint = ep;
@@ -98,7 +100,7 @@ async function sendBatchToServer(b64Data) {
         try {
             let sep = ep.includes('?') ? '&' : '?';
             let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
-            const getResp = await fetch(targetUrl);
+            const getResp = await fetch(targetUrl, { priority: 'high' });
             if (getResp && getResp.ok) {
                 workingEndpoint = ep;
                 const text = await getResp.text();
@@ -116,7 +118,7 @@ async function sendBatchToServer(b64Data) {
 async function relayWorker(workerId) {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    let pollInterval = 40;
+    let pollInterval = 30;
 
     while (true) {
         try {
@@ -130,7 +132,8 @@ async function relayWorker(workerId) {
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(outgoing)
+                body: JSON.stringify(outgoing),
+                priority: 'high'
             }).catch(() => null);
 
             if (!localResp || !localResp.ok) {
@@ -145,7 +148,7 @@ async function relayWorker(workerId) {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН (MEGA TURBO)";
+                stLocal.innerText = "ПОДКЛЮЧЕН (TURBO NODELAY)";
                 stLocal.style.color = "#00ff66";
             }
 
@@ -179,12 +182,12 @@ async function relayWorker(workerId) {
                         }
                         totalBytes += b64Data.length;
                         if (recvBytes > 2048) {
-                            addLog('⚡ [W' + workerId + '] Крупный блок: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                            addLog('⚡ [W' + workerId + '] Turbo блок: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
                             pollInterval = 0;
                         } else if (recvBytes > 0) {
-                            pollInterval = 10;
+                            pollInterval = 5;
                         } else {
-                            pollInterval = 30;
+                            pollInterval = 25;
                         }
                         
                         const bElem = document.getElementById('bytes');
@@ -197,19 +200,19 @@ async function relayWorker(workerId) {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    pollInterval = 50;
+                    pollInterval = 40;
                 }
             } else {
-                pollInterval = 120;
+                pollInterval = 100;
             }
         } catch (e) { }
         await new Promise(r => setTimeout(r, pollInterval));
     }
 }
 
-addLog("🚀 Высокоскоростной Turbo-движок v23.0 (Mega-Burst 1080p) запущен.", "#00ff66");
+addLog("🚀 Высокоскоростной NoDelay Turbo-движок v24.0 (2MB TCP Window) запущен.", "#00ff66");
 relayWorker(1);
-setTimeout(() => relayWorker(2), 35);
+setTimeout(() => relayWorker(2), 25);
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -278,7 +281,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v23.0 (Mega-Burst 1080p)</title>
+    <title>⚡ Yandex Relay Bridge v24.0 (NoDelay 2MB Window)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -303,7 +306,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Mega-Burst v23.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[NoDelay 2MB Window v24.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -449,6 +452,15 @@ class YandexRenderBridgeServer:
                 asyncio.open_connection(addr, port, family=socket.AF_INET),
                 timeout=8.0
             )
+            sock = w.get_extra_info('socket')
+            if sock:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2097152)
+                except:
+                    pass
+
             self.sessions[sid] = {
                 'w': w,
                 'r': r,
@@ -517,7 +529,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v23.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v24.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
