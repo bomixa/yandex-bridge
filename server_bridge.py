@@ -17,13 +17,14 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере
+# JavaScript код для моста в браузере с защитой от 429 Rate-Limit
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
+let pollInterval = 180; // Оптимальный интервал без 429
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -33,7 +34,7 @@ function addLog(msg, color) {
     if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 80) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 70) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
@@ -96,9 +97,12 @@ async function sendBatchToServer(b64Data) {
             if (resp && resp.ok) {
                 workingEndpoint = ep;
                 const text = await resp.text();
-                return { ok: true, text: text, ep: ep };
+                return { ok: true, status: resp.status, text: text, ep: ep };
             } else if (resp) {
                 lastError = "HTTP " + resp.status;
+                if (resp.status === 429) {
+                    return { ok: false, is429: true, error: "HTTP 429 (Лимит запросов)" };
+                }
             }
         } catch(e) {
             lastError = e.message;
@@ -111,11 +115,11 @@ async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
-    addLog("🚀 Транспортный движок v9.2 запущен.", "#00ff66");
+    addLog("🚀 Транспортный движок v9.5 (Rate-Limit Safe) запущен.", "#00ff66");
 
     while (true) {
         try {
-            // 1. Опрос локального клиента на localhost:8888
+            // 1. Опрос локального клиента
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -149,6 +153,7 @@ async function relayLoop() {
                 const res = await sendBatchToServer(b64Data);
 
                 if (res.ok) {
+                    pollInterval = 150; // Быстрый опрос при активном трафике
                     let rawB64 = res.text;
                     if (res.text.includes('id="turbo_data">')) {
                         rawB64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
@@ -161,7 +166,9 @@ async function relayLoop() {
                                 responseQueue.push(item);
                                 recvBytes += item.data.length;
                             }
-                            if (item.sid && item.sid !== "IDLE") {
+                            if (item.data === "EOF" || item.type === "close") {
+                                activeSessions.delete(item.sid);
+                            } else if (item.sid && item.sid !== "IDLE") {
                                 activeSessions.add(item.sid);
                             }
                             packetCount++;
@@ -181,13 +188,21 @@ async function relayLoop() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
+                    if (res.is429) {
+                        addLog('⏳ Пауза 1.5с (Лимит запросов Яндекс)', '#ffaa00');
+                        await new Promise(r => setTimeout(r, 1500));
+                        pollInterval = 300;
+                    } else {
+                        addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
+                    }
                 }
+            } else {
+                pollInterval = 500; // Медленный опрос в режиме ожидания
             }
         } catch (e) {
             addLog('❌ Сбой: ' + e.message, '#ff3344');
         }
-        await new Promise(r => setTimeout(r, 40));
+        await new Promise(r => setTimeout(r, pollInterval));
     }
 }
 
@@ -200,7 +215,7 @@ JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf
 class YandexRenderBridgeServer:
     def __init__(self):
         self.sessions = {}
-        self.pending_buffers = {}  # sid -> bytearray (на случай если data пришла раньше подключения)
+        self.pending_buffers = {}
         self.buffer_lock = asyncio.Lock()
         self.total_bytes_rx = 0
         self.total_bytes_tx = 0
@@ -257,7 +272,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v9.2</title>
+    <title>⚡ Yandex Relay Bridge v9.5</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -282,7 +297,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v9.2]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v9.5]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -374,7 +389,6 @@ class YandexRenderBridgeServer:
                 info = json.loads(base64.b64decode(payload).decode('utf-8', 'ignore'))
                 addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
                 port = int(info['port'])
-                # Ожидаем установления TCP соединения, чтобы сразу быть готовым к data
                 await self.open_connection(sid, addr, port)
                 return {"sid": sid, "data": "EMPTY", "type": "connect"}
             except Exception as e:
@@ -392,7 +406,6 @@ class YandexRenderBridgeServer:
                     logging.debug(f"[{sid}] Write error: {e}")
                     self.sessions[sid]['active'] = False
             else:
-                # Буферизуем, если соединение еще устанавливается
                 if sid not in self.pending_buffers:
                     self.pending_buffers[sid] = bytearray()
                 self.pending_buffers[sid].extend(raw_data)
@@ -435,7 +448,6 @@ class YandexRenderBridgeServer:
                 'active': True,
                 'last_poll': time.time()
             }
-            # Отправляем накопленные данные (если пришли до завершения коннекта)
             if sid in self.pending_buffers and self.pending_buffers[sid]:
                 w.write(self.pending_buffers[sid])
                 await w.drain()
@@ -472,7 +484,7 @@ class YandexRenderBridgeServer:
             await asyncio.sleep(15)
             now = time.time()
             async with self.buffer_lock:
-                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 45]
+                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30]
                 for sid in to_del:
                     if sid in self.sessions:
                         try:
@@ -499,7 +511,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v9.2 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v9.5 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
