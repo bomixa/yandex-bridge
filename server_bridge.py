@@ -175,6 +175,9 @@ async function relayLoop() {
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
                             addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                            pollInterval = 0; // Нулевая задержка конвейера для видео
+                        } else {
+                            pollInterval = 10;
                         }
                         
                         const bElem = document.getElementById('bytes');
@@ -188,10 +191,10 @@ async function relayLoop() {
                     }
                 } else {
                     addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
+                    pollInterval = 50;
                 }
-                pollInterval = 30;
             } else {
-                pollInterval = 250;
+                pollInterval = 150;
             }
         } catch (e) {
             addLog('❌ Сбой: ' + e.message, '#ff3344');
