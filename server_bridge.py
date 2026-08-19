@@ -3,11 +3,11 @@ import base64
 import json
 import logging
 import os
+import socket
 import time
 from aiohttp import web
 
-# --- КОНФИГУРАЦИЯ СЕРВЕРА ---
-# Render.com автоматически передает порт через переменную окружения PORT
+# Render.com передает порт через переменную окружения PORT
 LISTEN_PORT = int(os.environ.get("PORT", 8181))
 
 logging.basicConfig(
@@ -20,7 +20,7 @@ logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 class YandexRenderBridgeServer:
     def __init__(self):
-        # sid -> {'writer': writer, 'reader': reader, 'buffer': bytearray(), 'active': bool, 'last_poll': float}
+        # sid -> {'w': writer, 'r': reader, 'buffer': bytearray(), 'active': bool, 'last_poll': float}
         self.sessions = {}
         self.buffer_lock = asyncio.Lock()
         self.total_bytes_rx = 0
@@ -28,42 +28,38 @@ class YandexRenderBridgeServer:
         self.start_time = time.time()
 
     async def handle_ping(self, request):
-        """Эндпоинт для проверки статуса и предотвращения сна Render.com"""
-        headers = {
+        cors = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': '*',
-            'Access-Control-Allow-Headers': '*'
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Allow-Private-Network': 'true'
         }
         return web.json_response({
             "status": "online",
             "uptime_sec": int(time.time() - self.start_time),
             "active_sessions": len(self.sessions),
             "timestamp": time.time()
-        }, headers=headers)
+        }, headers=cors)
 
     async def get_dashboard(self, request):
-        """Главная веб-страница, открываемая через Яндекс.Переводчик для работы AJAX-моста"""
-        # Проверка на рукопожатие или ботов
-        if "data_" in request.path or "d=" in request.query_string:
-            return web.Response(text="---BRIDGE_START---ALIVE:Render Bridge Active---BRIDGE_END---")
-
+        """Дашборд и движок ретрансляции, адаптированный под проксирование Яндекс.Переводчика"""
         html = """<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex-Render Relay Bridge</title>
+    <title>⚡ Yandex Relay Bridge</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0a0c10; color: #00ff66; padding: 15px; }
-        .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #1f242c; margin-bottom: 15px; }
-        h1 { font-size: 20px; color: #fff; font-weight: 600; }
-        h1 span { color: #00ff66; font-size: 14px; margin-left: 8px; font-weight: normal; }
-        .grid { display: grid; grid-template-columns: 1fr 340px; gap: 15px; }
-        @media(max-width: 850px) { .grid { grid-template-columns: 1fr; } }
-        #log { background: #040507; border: 1px solid #1a202c; height: 500px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; box-shadow: inset 0 0 10px rgba(0,0,0,0.8); }
-        .card { background: #12161f; border: 1px solid #1f2633; padding: 16px; border-radius: 6px; }
-        .packet { border-bottom: 1px solid #161b24; padding: 4px 0; color: #8fa3bf; word-break: break-all; }
+        body { font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }
+        .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #1a2230; margin-bottom: 15px; }
+        h1 { font-size: 18px; color: #fff; font-weight: 600; }
+        h1 span { color: #00ff66; font-size: 13px; font-weight: normal; margin-left: 8px; }
+        .grid { display: grid; grid-template-columns: 1fr 320px; gap: 15px; }
+        @media(max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+        #log { background: #020305; border: 1px solid #161e2b; height: 500px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; }
+        .card { background: #0e131d; border: 1px solid #1a2332; padding: 16px; border-radius: 6px; }
+        .packet { border-bottom: 1px solid #141b27; padding: 4px 0; color: #8fa3bf; word-break: break-all; }
         .packet b { color: #00ff66; }
         .packet .time { color: #506177; font-size: 11px; margin-right: 5px; }
         .indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #555; margin-right: 8px; }
@@ -73,16 +69,23 @@ class YandexRenderBridgeServer:
         .stat b { color: #00ff66; }
         button { background: #00ff66; color: #000; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: 700; width: 100%; margin-top: 8px; transition: 0.2s; }
         button:hover { background: #00cc52; }
-        .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
-        .tag-ok { background: rgba(0,255,102,0.15); color: #00ff66; }
-        .tag-off { background: rgba(255,51,68,0.15); color: #ff3344; }
+        .unlock-btn { display: none; background: #ff3344; color: #fff; padding: 12px; text-align: center; text-decoration: none; font-weight: bold; border-radius: 4px; margin-bottom: 12px; font-size: 12px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>v5.2 [Batch Mode]</span></h1>
-        <div id="bridge-status"><span class="tag tag-ok">RENDER: ONLINE</span></div>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.0]</span></h1>
+        <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
+
+    <!-- Скрытая ссылка для автоматического вычисления URL Яндекс-прокси -->
+    <a id="proxy_path" href="/api/batch" style="display:none"></a>
+
+    <a id="unlock_btn" href="http://127.0.0.1:8888/exchange" target="_blank" class="unlock-btn">
+        ⚠️ НАЖМИТЕ ЗДЕСЬ ДЛЯ РАЗРЕШЕНИЯ ДОСТУПА К ЛОКАЛЬНОМУ КЛИЕНТУ
+    </a>
+
     <div class="grid">
         <div id="log"></div>
         <div class="card">
@@ -91,9 +94,9 @@ class YandexRenderBridgeServer:
                 <b id="st-local" style="color:#ff3344">ОФЛАЙН</b>
             </div>
             <div class="stat"><span>Трафик туннеля:</span> <b id="bytes">0.0 KB</b></div>
+            <div class="stat"><span>Обработано пакетов:</span> <b id="pk-count">0</b></div>
             <div class="stat"><span>Активные сессии:</span> <b id="sess-count">0</b></div>
-            <div class="stat"><span>Пакеты в очереди:</span> <b id="q-count">0</b></div>
-            <hr style="border:0; border-top:1px solid #1f2633; margin: 15px 0;">
+            <hr style="border:0; border-top:1px solid #1a2332; margin: 15px 0;">
             <button onclick="testInternet()">🔍 ПРОВЕРИТЬ ИНТЕРНЕТ СЕРВЕРА</button>
             <div id="test-res" style="margin-top:10px; font-size:12px; color:#8fa3bf; text-align:center;"></div>
         </div>
@@ -102,7 +105,21 @@ class YandexRenderBridgeServer:
     <script>
         let responseQueue = [];
         let totalBytes = 0;
-        let activeSessionsMap = new Set();
+        let packetCount = 0;
+        let activeSessions = new Set();
+        const log = document.getElementById('log');
+        const indLocal = document.getElementById('ind-local');
+        const stLocal = document.getElementById('st-local');
+        const unlockBtn = document.getElementById('unlock_btn');
+
+        function addLog(msg) {
+            const d = document.createElement('div');
+            d.className = 'packet';
+            d.innerHTML = `<span class="time">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
+            log.appendChild(d);
+            if (log.childNodes.length > 50) log.removeChild(log.firstChild);
+            log.scrollTop = log.scrollHeight;
+        }
 
         async function testInternet() {
             const res = document.getElementById('test-res');
@@ -112,96 +129,151 @@ class YandexRenderBridgeServer:
                 const data = await r.json();
                 res.innerHTML = `<span style="color:#00ff66">✓ IP Сервера: <b>${data.ip}</b></span>`;
             } catch(e) {
-                res.innerHTML = `<span style="color:#ff3344">✗ Ошибка доступа к внешнему IP</span>`;
+                res.innerHTML = `<span style="color:#ff3344">✗ Ошибка внешнего IP</span>`;
             }
         }
 
-        async function relayLoop() {
-            const log = document.getElementById('log');
-            const indLocal = document.getElementById('ind-local');
-            const stLocal = document.getElementById('st-local');
-            
-            while(true) {
+        // Обработка данных, полученных от локального клиента
+        window.handleClientTasks = async function(tasks) {
+            indLocal.className = 'indicator active';
+            stLocal.innerText = "ПОДКЛЮЧЕН";
+            stLocal.style.color = "#00ff66";
+            unlockBtn.style.display = 'none';
+
+            if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
+                const proxyAnchor = document.getElementById('proxy_path');
+                const proxyUrl = proxyAnchor ? proxyAnchor.href : '/api/batch';
+                
                 try {
-                    // 1. Опрос локального клиента (на localhost:8888)
-                    const localResp = await fetch('http://localhost:8888/exchange', {
+                    const encodedPayload = encodeURIComponent(btoa(JSON.stringify(tasks)));
+                    const serverResp = await fetch(proxyUrl + (proxyUrl.includes('?') ? '&' : '?') + 't=' + Date.now(), {
                         method: 'POST',
-                        mode: 'cors',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(responseQueue)
-                    }).catch(() => null);
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'p=' + encodedPayload
+                    });
 
-                    if (!localResp || !localResp.ok) {
-                        indLocal.className = 'indicator error';
-                        stLocal.innerText = "ОФЛАЙН";
-                        stLocal.style.color = "#ff3344";
-                        await new Promise(r => setTimeout(r, 1000));
-                        continue;
-                    }
-
-                    indLocal.className = 'indicator active';
-                    stLocal.innerText = "ПОДКЛЮЧЕН";
-                    stLocal.style.color = "#00ff66";
-                    responseQueue = []; // очищаем отправленные ответы
-
-                    const tasks = await localResp.json();
-                    document.getElementById('q-count').innerText = tasks.length;
-
-                    if (tasks.length > 0 && tasks[0].sid !== "IDLE") {
-                        // 2. Отправка пакетов на Render-сервер
-                        const serverResp = await fetch('/api/batch', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(tasks)
-                        });
-                        
-                        if (serverResp.ok) {
-                            const results = await serverResp.json();
+                    if (serverResp.ok) {
+                        const htmlText = await serverResp.text();
+                        if (htmlText.includes('id="turbo_data">')) {
+                            const rawB64 = htmlText.split('id="turbo_data">')[1].split('</script>')[0].trim();
+                            const results = JSON.parse(atob(rawB64));
+                            
+                            responseQueue = [];
                             for (let res of results) {
                                 if (res.data && res.data !== "EMPTY") {
                                     responseQueue.push(res);
                                 }
                                 if (res.sid && res.sid !== "IDLE") {
-                                    activeSessionsMap.add(res.sid);
+                                    activeSessions.add(res.sid);
                                 }
-                                const d = document.createElement('div');
-                                d.className = 'packet';
-                                d.innerHTML = `<span class="time">[${new Date().toLocaleTimeString()}]</span> <b>${res.sid}</b> | <span>${res.type || 'data'}</span> ${res.data && res.data !== 'EMPTY' ? '⚡ ' + res.data.length + 'b' : ''}`;
-                                log.appendChild(d);
-                                if (log.childNodes.length > 35) log.removeChild(log.firstChild);
+                                packetCount++;
+                                addLog(`<b>${res.sid}</b> | ${res.type || 'data'} ${res.data && res.data !== 'EMPTY' ? '⚡ ' + res.data.length + 'b' : ''}`);
                             }
-                            totalBytes += JSON.stringify(tasks).length;
+                            totalBytes += encodedPayload.length;
                             document.getElementById('bytes').innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                            document.getElementById('sess-count').innerText = activeSessionsMap.size;
-                            log.scrollTop = log.scrollHeight;
+                            document.getElementById('pk-count').innerText = packetCount;
+                            document.getElementById('sess-count').innerText = activeSessions.size;
                         }
                     }
                 } catch(e) {
-                    console.error("Relay error:", e);
+                    console.error("Server relay error:", e);
                 }
-                await new Promise(r => setTimeout(r, 50));
             }
+        };
+
+        async function relayLoop() {
+            // 1. Сначала пробуем Fetch с поддержкой Private Network Access
+            try {
+                const sendBody = JSON.stringify(responseQueue);
+                responseQueue = [];
+                const localResp = await fetch('http://127.0.0.1:8888/exchange', {
+                    method: 'POST',
+                    mode: 'cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: sendBody
+                }).catch(() => null);
+
+                if (localResp && localResp.ok) {
+                    const tasks = await localResp.json();
+                    await window.handleClientTasks(tasks);
+                    setTimeout(relayLoop, 40);
+                    return;
+                }
+            } catch(e) { }
+
+            // 2. Если Fetch заблокирован браузером (PNA), используем JSONP как резерв
+            try {
+                const script = document.createElement('script');
+                const q = encodeURIComponent(JSON.stringify(responseQueue));
+                responseQueue = [];
+                script.src = `http://127.0.0.1:8888/exchange?callback=handleClientTasks&data=${q}&t=${Date.now()}`;
+                
+                script.onerror = () => {
+                    indLocal.className = 'indicator error';
+                    stLocal.innerText = "ОФЛАЙН";
+                    stLocal.style.color = "#ff3344";
+                    unlockBtn.style.display = 'block';
+                };
+                
+                document.body.appendChild(script);
+                setTimeout(() => { script.remove(); }, 1000);
+            } catch(e) { }
+
+            setTimeout(relayLoop, 150);
         }
 
-        // Запуск цикла ретрансляции
+        addLog("Транспортный движок моста запущен.");
         relayLoop();
     </script>
 </body>
 </html>"""
-        return web.Response(text=html, content_type='text/html')
+        return web.Response(text=html, content_type='text/html', headers={'Cache-Control': 'no-cache'})
 
     async def handle_batch(self, request):
-        """Пакетная обработка задач туннеля от браузера"""
+        cors = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Allow-Private-Network': 'true'
+        }
+        if request.method == "OPTIONS":
+            return web.Response(headers=cors)
+
         try:
-            tasks = await request.json()
+            # Читаем form-data 'p' или querystring
+            b64_payload = ""
+            if request.method == "POST":
+                post_data = await request.post()
+                b64_payload = post_data.get("p")
+                if not b64_payload:
+                    try:
+                        raw_body = await request.text()
+                        if raw_body.startswith("p="):
+                            from urllib.parse import unquote
+                            b64_payload = unquote(raw_body[2:])
+                    except:
+                        pass
+            if not b64_payload:
+                b64_payload = request.query.get("p")
+
+            if not b64_payload:
+                res_html = '<html><body><script id="turbo_data">' + base64.b64encode(b"[]").decode() + '</script></body></html>'
+                return web.Response(text=res_html, content_type='text/html', headers=cors)
+
+            tasks = json.loads(base64.b64decode(b64_payload).decode('utf-8', 'ignore'))
             results = []
             for t in tasks:
                 res = await self.process_packet(t)
                 results.append(res)
-            return web.json_response(results)
+
+            resp_b64 = base64.b64encode(json.dumps(results).encode()).decode()
+            # Оборачиваем в <script id="turbo_data"> чтобы Яндекс.Переводчик не искажал Base64
+            res_html = f'<html><body><script id="turbo_data">{resp_b64}</script></body></html>'
+            return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
             logging.error(f"Error in handle_batch: {e}")
-            return web.json_response([], status=400)
+            res_html = '<html><body><script id="turbo_data">' + base64.b64encode(b"[]").decode() + '</script></body></html>'
+            return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def process_packet(self, packet):
         sid = packet.get("sid")
@@ -209,31 +281,41 @@ class YandexRenderBridgeServer:
         payload = packet.get("p")
         resp_data = "EMPTY"
 
+        if not sid or sid == "IDLE":
+            return {"sid": "IDLE", "data": "EMPTY", "type": "idle"}
+
         if p_type == "connect":
             try:
-                info = json.loads(base64.b64decode(payload).decode())
-                await self.open_connection(sid, info['addr'], info['port'])
+                info = json.loads(base64.b64decode(payload).decode('utf-8', 'ignore'))
+                addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
+                port = int(info['port'])
+                await self.open_connection(sid, addr, port)
+                return {"sid": sid, "data": "OK", "type": "connect"}
             except Exception as e:
                 logging.error(f"[{sid}] Connect parse error: {e}")
+                return {"sid": sid, "data": "ERROR", "type": "connect"}
+
         elif p_type == "data" and payload:
             if sid in self.sessions and self.sessions[sid]['active']:
                 try:
                     raw_data = base64.b64decode(payload)
-                    self.sessions[sid]['writer'].write(raw_data)
-                    await self.sessions[sid]['writer'].drain()
+                    self.sessions[sid]['w'].write(raw_data)
+                    await self.sessions[sid]['w'].drain()
                     self.total_bytes_rx += len(raw_data)
                 except Exception as e:
                     logging.debug(f"[{sid}] Write error: {e}")
                     self.sessions[sid]['active'] = False
+
         elif p_type == "close":
             if sid in self.sessions:
                 try:
-                    self.sessions[sid]['writer'].close()
+                    self.sessions[sid]['w'].close()
                 except:
                     pass
                 del self.sessions[sid]
-                return {"sid": sid, "data": "CLOSED", "type": "close"}
+                return {"sid": sid, "data": "EOF", "type": "close"}
 
+        # Проверяем буфер ответов для этой сессии
         if sid in self.sessions:
             async with self.buffer_lock:
                 self.sessions[sid]['last_poll'] = time.time()
@@ -241,31 +323,34 @@ class YandexRenderBridgeServer:
                     resp_data = base64.b64encode(self.sessions[sid]['buffer']).decode()
                     self.total_bytes_tx += len(self.sessions[sid]['buffer'])
                     self.sessions[sid]['buffer'] = bytearray()
+                elif not self.sessions[sid]['active']:
+                    resp_data = "EOF"
+                    del self.sessions[sid]
 
         return {"sid": sid, "data": resp_data, "type": p_type}
 
     async def open_connection(self, sid, addr, port):
-        """Открытие исходящего TCP соединения во внешний интернет с хоста Render"""
+        """Открытие исходящего TCP соединения во внешний интернет"""
         try:
             logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(addr, port),
+            r, w = await asyncio.wait_for(
+                asyncio.open_connection(addr, port, family=socket.AF_INET),
                 timeout=12.0
             )
             self.sessions[sid] = {
-                'writer': writer,
-                'reader': reader,
+                'w': w,
+                'r': r,
                 'buffer': bytearray(),
                 'active': True,
                 'last_poll': time.time()
             }
-            asyncio.create_task(self.read_remote(sid, reader))
+            asyncio.create_task(self.read_remote(sid, r))
             logging.info(f"[+] [{sid}] Connected to {addr}:{port}")
         except Exception as e:
             logging.error(f"[-] [{sid}] Connection failed ({addr}:{port}): {e}")
 
     async def read_remote(self, sid, reader):
-        """Чтение данных от целевого хоста во внутренний буфер сессии"""
+        """Чтение данных от удаленного хоста в буфер"""
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
@@ -286,32 +371,27 @@ class YandexRenderBridgeServer:
                 self.sessions[sid]['active'] = False
 
     async def session_cleaner(self):
-        """Очистка заброшенных или закрытых сессий"""
+        """Очистка старых сессий"""
         while True:
-            await asyncio.sleep(15)
+            await asyncio.sleep(20)
             now = time.time()
-            to_del = []
-            for sid, s in list(self.sessions.items()):
-                # Если сессия неактивна и буфер пуст, либо не опрашивалась > 45 сек
-                if (not s['active'] and len(s['buffer']) == 0) or (now - s['last_poll'] > 45):
-                    to_del.append(sid)
-
-            for sid in to_del:
-                if sid in self.sessions:
-                    try:
-                        self.sessions[sid]['writer'].close()
-                    except:
-                        pass
-                    del self.sessions[sid]
-                    logging.info(f"[X] Cleaned session {sid}")
+            async with self.buffer_lock:
+                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 60]
+                for sid in to_del:
+                    if sid in self.sessions:
+                        try:
+                            self.sessions[sid]['w'].close()
+                        except:
+                            pass
+                        del self.sessions[sid]
+                        logging.info(f"[X] Cleaned session {sid}")
 
     async def run(self):
         app = web.Application()
-        app.router.add_get('/', self.get_dashboard)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
-        app.router.add_post('/api/batch', self.handle_batch)
-        # Обработка любых других путей (для совместимости)
+        app.router.add_route('*', '/api/batch', self.handle_batch)
+        app.router.add_get('/', self.get_dashboard)
         app.router.add_get('/{tail:.*}', self.get_dashboard)
 
         runner = web.AppRunner(app)
@@ -320,7 +400,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER STARTED ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v6.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
