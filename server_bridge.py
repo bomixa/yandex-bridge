@@ -23,7 +23,7 @@ let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
-let pollInterval = 40;
+let queueLock = false;
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -33,7 +33,7 @@ function addLog(msg, color) {
     if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 70) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 80) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
@@ -113,18 +113,24 @@ async function sendBatchToServer(b64Data) {
     return { ok: false, error: lastError };
 }
 
-async function relayLoop() {
+async function relayWorker(workerId) {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-
-    addLog("🚀 Транспортный движок v14.0 (Ultra-Fast Turbo) запущен.", "#00ff66");
+    let pollInterval = 30;
 
     while (true) {
         try {
+            let outgoing = [];
+            while (queueLock) { await new Promise(r => setTimeout(r, 5)); }
+            queueLock = true;
+            outgoing = responseQueue;
+            responseQueue = [];
+            queueLock = false;
+
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(responseQueue)
+                body: JSON.stringify(outgoing)
             }).catch(() => null);
 
             if (!localResp || !localResp.ok) {
@@ -139,10 +145,9 @@ async function relayLoop() {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН";
+                stLocal.innerText = "ПОДКЛЮЧЕН (2x PIPELINE)";
                 stLocal.style.color = "#00ff66";
             }
-            responseQueue = [];
 
             const tasks = await localResp.json();
 
@@ -174,8 +179,8 @@ async function relayLoop() {
                         }
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
-                            addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
-                            pollInterval = 0; // Нулевая задержка конвейера для видео
+                            addLog('⚡ [W' + workerId + '] Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                            pollInterval = 0;
                         } else {
                             pollInterval = 10;
                         }
@@ -190,20 +195,19 @@ async function relayLoop() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
-                    pollInterval = 50;
+                    pollInterval = 40;
                 }
             } else {
-                pollInterval = 150;
+                pollInterval = 120;
             }
-        } catch (e) {
-            addLog('❌ Сбой: ' + e.message, '#ff3344');
-        }
+        } catch (e) { }
         await new Promise(r => setTimeout(r, pollInterval));
     }
 }
 
-relayLoop();
+addLog("🚀 Двухпоточный Turbo-конвейер v20.0 (1080p/4K Ultra-Speed) запущен.", "#00ff66");
+relayWorker(1);
+setTimeout(() => relayWorker(2), 25);
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -272,7 +276,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v14.0 (Ultra-Fast Turbo)</title>
+    <title>⚡ Yandex Relay Bridge v20.0 (1080p/4K Ultra-Speed)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -297,7 +301,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Ultra-Fast Turbo v14.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[1080p/4K Ultra-Speed v20.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -424,7 +428,6 @@ class YandexRenderBridgeServer:
                 del self.pending_buffers[sid]
             return {"sid": sid, "data": "EOF", "type": "close"}
 
-        # Читаем буфер только для poll/data
         if sid in self.sessions:
             async with self.buffer_lock:
                 self.sessions[sid]['last_poll'] = time.time()
@@ -465,7 +468,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(262144), timeout=0.5)
+                    data = await asyncio.wait_for(reader.read(524288), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -496,7 +499,7 @@ class YandexRenderBridgeServer:
                         del self.sessions[sid]
 
     async def run(self):
-        app = web.Application(client_max_size=20*1024*1024)
+        app = web.Application(client_max_size=30*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
         app.router.add_route('*', '/api/ip', self.handle_get_ip)
@@ -512,7 +515,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v12.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v20.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
