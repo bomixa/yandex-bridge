@@ -17,7 +17,7 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере с безопасным UTF-8 Base64
+# JavaScript код для моста в браузере с DOM-резолвером Яндекс.Турбо
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
@@ -36,7 +36,6 @@ function addLog(msg, color) {
     log.scrollTop = log.scrollHeight;
 }
 
-// Безопасное кодирование в Base64 без ошибок Latin1
 function utf8_to_b64(str) {
     try {
         return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function(match, p1) {
@@ -57,52 +56,30 @@ function b64_to_utf8(b64) {
     }
 }
 
-function getTargetEndpoints() {
-    let endpoints = [];
-    endpoints.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
-    endpoints.push('/api/batch');
-    let path = (window.location.pathname || '').replace(/\\/+$/, '');
-    if (path.includes('proxy_u') || path.includes('turbopages.org')) {
-        endpoints.push(path + '/api/batch');
+function getProxyUrl() {
+    const el = document.getElementById('proxy_path');
+    if (el && el.href && el.href !== "" && el.href !== "about:blank") {
+        return el.href;
     }
-    return endpoints;
+    let p = window.location.pathname || '';
+    return p.replace(/\\/+$/, '') + '/api/batch';
 }
 
 async function testInternet() {
     const res = document.getElementById('test-res');
     if (res) res.innerHTML = "Запрос внешнего IP...";
     try {
-        const r = await fetch('https://yandex-bridge-dlc6.onrender.com/api/ip').catch(() => null);
+        const pUrl = getProxyUrl().replace('/api/batch', '/api/ip');
+        const r = await fetch(pUrl + (pUrl.includes('?') ? '&' : '?') + 't=' + Date.now()).catch(() => null);
         if (r && r.ok) {
             const data = await r.json();
             if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b> (' + (data.country || 'Cloud') + ')</span>';
             return;
         }
-        const r2 = await fetch('https://api.ipify.org?format=json');
-        const data2 = await r2.json();
-        if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP: <b>' + data2.ip + '</b></span>';
+        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка получения IP</span>';
     } catch(e) {
         if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка: ' + e.message + '</span>';
     }
-}
-
-async function sendToServer(payload) {
-    const endpoints = getTargetEndpoints();
-    let lastErr = "";
-    for (let url of endpoints) {
-        try {
-            const resp = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: payload
-            });
-            if (resp && resp.ok) return { ok: true, resp: resp };
-            if (resp) lastErr = "HTTP " + resp.status;
-        } catch(e) {
-            lastErr = e.message;
-        }
-    }
-    return { ok: false, err: lastErr };
 }
 
 async function relayLoop() {
@@ -137,45 +114,55 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Пересылка задач на Render
+            // 2. Отправка задач на Render через DOM proxyUrl
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const b64Data = utf8_to_b64(JSON.stringify(tasks));
                 const payload = "p=" + encodeURIComponent(b64Data);
-                const sendResult = await sendToServer(payload);
+                const proxyUrl = getProxyUrl();
 
-                if (sendResult && sendResult.ok) {
-                    const text = await sendResult.resp.text();
-                    let b64 = text;
-                    if (text.includes('id="turbo_data">')) {
-                        b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
-                    }
-                    try {
-                        const jsonStr = b64_to_utf8(b64);
-                        const results = JSON.parse(jsonStr);
-                        for (let res of results) {
-                            if (res.data && res.data !== "EMPTY") {
-                                responseQueue.push(res);
-                            }
-                            if (res.sid && res.sid !== "IDLE") {
-                                activeSessions.add(res.sid);
-                            }
-                            packetCount++;
-                            if (res.data && res.data !== "EMPTY") {
-                                addLog('<b>[' + res.sid + ']</b> ' + (res.type || 'data') + ' ⚡ ' + res.data.length + ' байт');
-                            }
+                try {
+                    const serverResp = await fetch(proxyUrl + (proxyUrl.includes('?') ? '&' : '?') + 't=' + Date.now(), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: payload
+                    });
+
+                    if (serverResp && serverResp.ok) {
+                        const text = await serverResp.text();
+                        let b64 = text;
+                        if (text.includes('id="turbo_data">')) {
+                            b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
                         }
-                        totalBytes += payload.length;
-                        const bElem = document.getElementById('bytes');
-                        if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                        const pkElem = document.getElementById('pk-count');
-                        if (pkElem) pkElem.innerText = packetCount;
-                        const sessElem = document.getElementById('sess-count');
-                        if (sessElem) sessElem.innerText = activeSessions.size;
-                    } catch(jsonErr) {
-                        addLog('Ошибка JSON: ' + jsonErr.message, '#ff3344');
+                        try {
+                            const jsonStr = b64_to_utf8(b64);
+                            const results = JSON.parse(jsonStr);
+                            for (let res of results) {
+                                if (res.data && res.data !== "EMPTY") {
+                                    responseQueue.push(res);
+                                }
+                                if (res.sid && res.sid !== "IDLE") {
+                                    activeSessions.add(res.sid);
+                                }
+                                packetCount++;
+                                if (res.data && res.data !== "EMPTY") {
+                                    addLog('<b>[' + res.sid + ']</b> ' + (res.type || 'data') + ' ⚡ ' + res.data.length + ' байт');
+                                }
+                            }
+                            totalBytes += payload.length;
+                            const bElem = document.getElementById('bytes');
+                            if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
+                            const pkElem = document.getElementById('pk-count');
+                            if (pkElem) pkElem.innerText = packetCount;
+                            const sessElem = document.getElementById('sess-count');
+                            if (sessElem) sessElem.innerText = activeSessions.size;
+                        } catch(jsonErr) {
+                            addLog('Ошибка JSON: ' + jsonErr.message, '#ff3344');
+                        }
+                    } else {
+                        addLog('Ошибка сервера: HTTP ' + (serverResp ? serverResp.status : 'нет ответа'), '#ff3344');
                     }
-                } else {
-                    addLog('Ошибка Render: ' + (sendResult ? sendResult.err : 'Сбой сети'), '#ff3344');
+                } catch(netErr) {
+                    addLog('Ошибка сети: ' + netErr.message, '#ff3344');
                 }
             }
         } catch (e) {
@@ -185,7 +172,7 @@ async function relayLoop() {
     }
 }
 
-addLog("Транспортный движок туннеля v7.2 готов.");
+addLog("Транспортный движок туннеля v7.5 готов.");
 relayLoop();
 """
 
@@ -246,7 +233,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v7.2</title>
+    <title>⚡ Yandex Relay Bridge v7.5</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -271,9 +258,12 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v7.2]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v7.5]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
+
+    <!-- Резолвер адреса Яндекс-прокси -->
+    <a id="proxy_path" href="/api/batch" style="display:none"></a>
 
     <div class="grid">
         <div id="log"></div>
@@ -467,7 +457,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v7.2 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v7.5 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
