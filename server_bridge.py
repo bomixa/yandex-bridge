@@ -17,7 +17,7 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере с DOM-резолвером Яндекс.Турбо
+# JavaScript код для моста в браузере с поддержкой GET через Турбостраницы
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
@@ -70,7 +70,8 @@ async function testInternet() {
     if (res) res.innerHTML = "Запрос внешнего IP...";
     try {
         const pUrl = getProxyUrl().replace('/api/batch', '/api/ip');
-        const r = await fetch(pUrl + (pUrl.includes('?') ? '&' : '?') + 't=' + Date.now()).catch(() => null);
+        const sep = pUrl.includes('?') ? '&' : '?';
+        const r = await fetch(pUrl + sep + 't=' + Date.now()).catch(() => null);
         if (r && r.ok) {
             const data = await r.json();
             if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b> (' + (data.country || 'Cloud') + ')</span>';
@@ -88,7 +89,7 @@ async function relayLoop() {
 
     while (true) {
         try {
-            // 1. Опрос локального клиента
+            // 1. Опрос локального клиента на localhost:8888
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -114,18 +115,15 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Отправка задач на Render через DOM proxyUrl
+            // 2. Отправка задач на Render через GET (100% совместимо с Турбостраницами Яндекса)
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const b64Data = utf8_to_b64(JSON.stringify(tasks));
-                const payload = "p=" + encodeURIComponent(b64Data);
                 const proxyUrl = getProxyUrl();
+                const sep = proxyUrl.includes('?') ? '&' : '?';
+                const targetUrl = proxyUrl + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
 
                 try {
-                    const serverResp = await fetch(proxyUrl + (proxyUrl.includes('?') ? '&' : '?') + 't=' + Date.now(), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: payload
-                    });
+                    const serverResp = await fetch(targetUrl);
 
                     if (serverResp && serverResp.ok) {
                         const text = await serverResp.text();
@@ -148,7 +146,7 @@ async function relayLoop() {
                                     addLog('<b>[' + res.sid + ']</b> ' + (res.type || 'data') + ' ⚡ ' + res.data.length + ' байт');
                                 }
                             }
-                            totalBytes += payload.length;
+                            totalBytes += b64Data.length;
                             const bElem = document.getElementById('bytes');
                             if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
                             const pkElem = document.getElementById('pk-count');
@@ -172,7 +170,7 @@ async function relayLoop() {
     }
 }
 
-addLog("Транспортный движок туннеля v7.5 готов.");
+addLog("Транспортный движок туннеля v8.0 готов.");
 relayLoop();
 """
 
@@ -233,7 +231,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v7.5</title>
+    <title>⚡ Yandex Relay Bridge v8.0</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -258,7 +256,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v7.5]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v8.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -302,8 +300,11 @@ class YandexRenderBridgeServer:
         try:
             b64_payload = ""
             if request.method == "POST":
-                post_data = await request.post()
-                b64_payload = post_data.get("p")
+                try:
+                    post_data = await request.post()
+                    b64_payload = post_data.get("p")
+                except:
+                    pass
                 if not b64_payload:
                     try:
                         raw_body = await request.text()
@@ -347,7 +348,6 @@ class YandexRenderBridgeServer:
                 info = json.loads(base64.b64decode(payload).decode('utf-8', 'ignore'))
                 addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
                 port = int(info['port'])
-                # Запуск асинхронного подключения
                 asyncio.create_task(self.open_connection(sid, addr, port))
                 return {"sid": sid, "data": "EMPTY", "type": "connect"}
             except Exception as e:
@@ -410,7 +410,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(32768), timeout=0.5)
+                    data = await asyncio.wait_for(reader.read(16384), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -457,7 +457,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v7.5 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v8.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
