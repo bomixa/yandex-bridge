@@ -17,7 +17,7 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере с детальной диагностикой и мульти-маршрутизацией
+# Чистый и надежный JavaScript код для ретранслятора
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
@@ -33,92 +33,57 @@ function addLog(msg, color) {
     if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 100) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 80) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
-function utf8_to_b64(str) {
-    try {
-        return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function(match, p1) {
-            return String.fromCharCode('0x' + p1);
-        }));
-    } catch(e) {
-        return btoa(str);
-    }
-}
-
-function b64_to_utf8(b64) {
-    try {
-        return decodeURIComponent(Array.prototype.map.call(atob(b64), function(c) {
-            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-        }).join(''));
-    } catch(e) {
-        return atob(b64);
-    }
-}
-
-// Поиск всех возможных вариантов маршрута
 function getCandidateEndpoints() {
     if (workingEndpoint) return [workingEndpoint];
     let list = [];
-    
-    // 1. Прямой путь внутри Turbopages (origin + pathname)
     let p = (window.location.pathname || '').replace(/\\/+$/, '');
     if (p.includes('proxy_u') || p.includes('turbopages.org')) {
         list.push(window.location.origin + p + '/api/batch');
     }
-    
-    // 2. Путь через location.href без параметров
     let baseHref = window.location.href.split('?')[0].replace(/\\/+$/, '');
     if (baseHref.includes('turbopages.org')) {
         list.push(baseHref + '/api/batch');
     }
-    
-    // 3. Через DOM-элемент proxy_path (если он на turbopages)
     const el = document.getElementById('proxy_path');
-    if (el && el.href) {
-        list.push(el.href);
-    }
-    
-    // 4. Относительный путь
+    if (el && el.href) list.push(el.href);
     list.push('/api/batch');
-    
-    // 5. Прямой URL Render
     list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
-    
-    // Удаляем дубликаты
     return Array.from(new Set(list));
 }
 
 async function testInternet() {
     const res = document.getElementById('test-res');
-    if (res) res.innerHTML = "Диагностика связи...";
-    addLog("🔍 [ДИАГНОСТИКА] Проверка доступных маршрутов...", "#00ff66");
+    if (res) res.innerHTML = "Проверка IP...";
+    addLog("🔍 Проверка внешнего IP сервера...", "#00ff66");
     
     const endpoints = getCandidateEndpoints();
     for (let ep of endpoints) {
         let ipUrl = ep.replace('/api/batch', '/api/ip');
         let sep = ipUrl.includes('?') ? '&' : '?';
         try {
-            addLog("-> Тест эндпоинта: " + ipUrl, "#8fa3bf");
-            const r = await fetch(ipUrl + sep + 't=' + Date.now(), { method: 'GET' });
+            const r = await fetch(ipUrl + sep + 't=' + Date.now());
             if (r && r.ok) {
-                const data = await r.json();
-                addLog("✓ [УСПЕХ] Эндпоинт работает! IP: " + data.ip, "#00ff66");
+                const text = await r.text();
+                let b64 = text;
+                if (text.includes('id="turbo_data">')) {
+                    b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
+                }
+                const data = JSON.parse(atob(b64));
+                addLog("✓ [IP СЕРВЕРА] " + data.ip + " (" + (data.country || 'Cloud') + ")", "#00ff66");
                 if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
                 workingEndpoint = ep;
                 return;
-            } else {
-                addLog("✗ [ОТВЕТ] HTTP " + (r ? r.status : 'нет ответа') + " для " + ipUrl, "#ffaa00");
             }
-        } catch(e) {
-            addLog("✗ [СБОЙ] " + e.message + " (" + ipUrl + ")", "#ff3344");
-        }
+        } catch(e) { }
     }
-    if (res) res.innerHTML = '<span style="color:#ff3344">✗ Все маршруты недоступны</span>';
+    if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка получения IP</span>';
 }
 
-async function sendBatchToServer(b64Data, tasksSummary) {
+async function sendBatchToServer(b64Data) {
     const endpoints = getCandidateEndpoints();
     let lastError = "";
 
@@ -129,14 +94,14 @@ async function sendBatchToServer(b64Data, tasksSummary) {
         try {
             const resp = await fetch(targetUrl, { method: 'GET' });
             if (resp && resp.ok) {
-                workingEndpoint = ep; // Запоминаем рабочий маршрут
+                workingEndpoint = ep;
                 const text = await resp.text();
                 return { ok: true, text: text, ep: ep };
             } else if (resp) {
-                lastError = "HTTP " + resp.status + " от " + ep;
+                lastError = "HTTP " + resp.status;
             }
         } catch(e) {
-            lastError = e.message + " (" + ep + ")";
+            lastError = e.message;
         }
     }
     return { ok: false, error: lastError };
@@ -146,17 +111,16 @@ async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
-    addLog("🚀 [СТАРТ] Движок моста v8.5 запущен. Origin: " + window.location.origin, "#00ff66");
-    addLog("📋 [МАРШРУТЫ] Проверяемые пути: " + JSON.stringify(getCandidateEndpoints()), "#8fa3bf");
+    addLog("🚀 Транспортный движок v9.0 запущен.", "#00ff66");
 
     while (true) {
         try {
-            // 1. Опрос локального клиента
+            // 1. Опрос локального клиента на localhost:8888
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(responseQueue)
-            }).catch((e) => null);
+            }).catch(() => null);
 
             if (!localResp || !localResp.ok) {
                 if (indLocal) indLocal.className = 'indicator error';
@@ -177,21 +141,20 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Отправка задач на сервер
+            // 2. Отправка задач на Render
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
-                const b64Data = utf8_to_b64(JSON.stringify(tasks));
+                const b64Data = btoa(JSON.stringify(tasks));
                 const sids = tasks.map(t => t.sid + ':' + (t.t || 'data')).join(', ');
                 
-                const res = await sendBatchToServer(b64Data, sids);
+                const res = await sendBatchToServer(b64Data);
 
                 if (res.ok) {
-                    let b64 = res.text;
+                    let rawB64 = res.text;
                     if (res.text.includes('id="turbo_data">')) {
-                        b64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
+                        rawB64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
                     }
                     try {
-                        const jsonStr = b64_to_utf8(b64);
-                        const results = JSON.parse(jsonStr);
+                        const results = JSON.parse(atob(rawB64));
                         let recvBytes = 0;
                         for (let item of results) {
                             if (item.data && item.data !== "EMPTY") {
@@ -204,7 +167,7 @@ async function relayLoop() {
                             packetCount++;
                         }
                         totalBytes += b64Data.length;
-                        addLog('<b>[OK]</b> Задачи: [' + sids + '] -> Получено: ' + recvBytes + 'b', recvBytes > 0 ? '#00ff66' : '#8fa3bf');
+                        addLog('<b>[OK]</b> [' + sids + '] -> Получено: ' + recvBytes + 'b', recvBytes > 0 ? '#00ff66' : '#8fa3bf');
                         
                         const bElem = document.getElementById('bytes');
                         if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
@@ -213,14 +176,14 @@ async function relayLoop() {
                         const sessElem = document.getElementById('sess-count');
                         if (sessElem) sessElem.innerText = activeSessions.size;
                     } catch(jsonErr) {
-                        addLog('❌ [JSON СБОЙ] ' + jsonErr.message, '#ff3344');
+                        addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    addLog('❌ [СЕТЬ] Ошибка пересылки: ' + res.error, '#ff3344');
+                    addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
                 }
             }
         } catch (e) {
-            addLog('❌ [ОШИБКА ЦИКЛА] ' + e.message, '#ff3344');
+            addLog('❌ Сбой: ' + e.message, '#ff3344');
         }
         await new Promise(r => setTimeout(r, 40));
     }
@@ -258,25 +221,23 @@ class YandexRenderBridgeServer:
     async def handle_get_ip(self, request):
         cors = {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Methods': '*',
             'Access-Control-Allow-Headers': '*',
-            'Access-Control-Allow-Private-Network': 'true',
             'Cache-Control': 'no-store, no-cache, must-revalidate'
         }
-        if request.method == "OPTIONS":
-            return web.Response(headers=cors)
-
         try:
             timeout = ClientTimeout(total=5.0)
             async with ClientSession(timeout=timeout) as s:
                 async with s.get('https://api.ipify.org?format=json') as r:
                     data = await r.json()
                     data["country"] = "Render Cloud"
-                    res_html = f'<html><body><script id="turbo_data">{base64.b64encode(json.dumps(data).encode()).decode()}</script>{json.dumps(data)}</body></html>'
+                    b64 = base64.b64encode(json.dumps(data).encode()).decode()
+                    res_html = f'<html><body><script id="turbo_data">{b64}</script></body></html>'
                     return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
             err_data = {"ip": f"Ошибка: {e}"}
-            res_html = f'<html><body><script id="turbo_data">{base64.b64encode(json.dumps(err_data).encode()).decode()}</script>{json.dumps(err_data)}</body></html>'
+            b64 = base64.b64encode(json.dumps(err_data).encode()).decode()
+            res_html = f'<html><body><script id="turbo_data">{b64}</script></body></html>'
             return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def get_dashboard(self, request):
@@ -293,7 +254,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v8.5</title>
+    <title>⚡ Yandex Relay Bridge v9.0</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -318,7 +279,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v8.5]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v9.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -520,7 +481,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v8.5 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v9.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
