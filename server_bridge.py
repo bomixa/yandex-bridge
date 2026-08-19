@@ -23,7 +23,6 @@ let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
-let queueLock = false;
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -82,7 +81,6 @@ async function sendBatchToServer(b64Data) {
     let lastError = "";
 
     for (let ep of endpoints) {
-        // 1. Быстрый POST для прямого режима и Render
         try {
             const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
                 method: 'POST',
@@ -98,7 +96,6 @@ async function sendBatchToServer(b64Data) {
             }
         } catch(postErr) { }
 
-        // 2. Fallback GET через DOM для Яндекс.Переводчика
         try {
             let sep = ep.includes('?') ? '&' : '?';
             let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
@@ -117,19 +114,17 @@ async function sendBatchToServer(b64Data) {
     return { ok: false, error: lastError };
 }
 
-async function liveStreamWorker(workerId) {
+async function strictInOrderStreamEngine() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    let pollInterval = 20;
+    let pollInterval = 10;
+
+    addLog("🚀 Строгий In-Order TLS-движок v26.0 (Zero Corruption & Full UI) запущен.", "#00ff66");
 
     while (true) {
         try {
-            let outgoing = [];
-            while (queueLock) { await new Promise(r => setTimeout(r, 4)); }
-            queueLock = true;
-            outgoing = responseQueue;
+            const outgoing = responseQueue;
             responseQueue = [];
-            queueLock = false;
 
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
@@ -150,7 +145,7 @@ async function liveStreamWorker(workerId) {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН (LIVE STREAM DUAL)";
+                stLocal.innerText = "ПОДКЛЮЧЕН (STRICT IN-ORDER)";
                 stLocal.style.color = "#00ff66";
             }
 
@@ -184,10 +179,8 @@ async function liveStreamWorker(workerId) {
                         }
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
-                            if (recvBytes > 50000) {
-                                addLog('⚡ [Live-W' + workerId + '] Поток: ' + (recvBytes/1024).toFixed(1) + ' KB', '#00ff66');
-                            }
-                            pollInterval = 0; // Нулевая задержка конвейера прямого эфира
+                            addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                            pollInterval = 0; // Нулевая задержка конвейера
                         } else {
                             pollInterval = 10;
                         }
@@ -212,9 +205,7 @@ async function liveStreamWorker(workerId) {
     }
 }
 
-addLog("🚀 Движок прямого эфира v25.0 (Live Stream Real-Time) запущен.", "#00ff66");
-liveStreamWorker(1);
-setTimeout(() => liveStreamWorker(2), 20);
+strictInOrderStreamEngine();
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -283,7 +274,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v25.0 (Live Stream Real-Time)</title>
+    <title>⚡ Yandex Relay Bridge v26.0 (Strict In-Order)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -308,7 +299,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Live Stream v25.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Strict In-Order v26.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -484,7 +475,7 @@ class YandexRenderBridgeServer:
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(1048576), timeout=0.3)
+                    data = await asyncio.wait_for(reader.read(1048576), timeout=0.25)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -531,7 +522,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v25.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v26.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
