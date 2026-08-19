@@ -37,15 +37,42 @@ function addLog(msg, color) {
 }
 
 function getCandidateEndpoints() {
-    if (workingEndpoint) return [workingEndpoint];
     let list = [];
+    let p = (window.location.pathname || '').replace(/\\/+$/, '');
+    if (p.includes('proxy_u') || p.includes('turbopages.org') || window.location.hostname.includes('yandex') || window.location.hostname.includes('turbopages')) {
+        list.push(window.location.origin + p + '/api/batch');
+        list.push(window.location.pathname.replace(/\\/+$/, '') + '/api/batch');
+    }
     list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
     list.push('/api/batch');
-    let p = (window.location.pathname || '').replace(/\\/+$/, '');
-    if (p.includes('proxy_u') || p.includes('turbopages.org')) {
-        list.push(window.location.origin + p + '/api/batch');
-    }
     return Array.from(new Set(list));
+}
+
+function extractTurboPayload(text) {
+    if (!text || typeof text !== 'string') return "";
+    text = text.trim();
+    
+    // 1. Поиск в meta-теге
+    if (text.includes('name="turbo_payload" content="')) {
+        return text.split('name="turbo_payload" content="')[1].split('"')[0].trim();
+    }
+    // 2. Поиск в textarea (защищено от перевода)
+    if (text.includes('id="turbo_area">')) {
+        return text.split('id="turbo_area">')[1].split('</textarea>')[0].trim();
+    }
+    // 3. Поиск в script
+    if (text.includes('id="turbo_data">')) {
+        return text.split('id="turbo_data">')[1].split('</script>')[0].trim();
+    }
+    // 4. Поиск в div
+    if (text.includes('id="turbo_div">')) {
+        return text.split('id="turbo_div">')[1].split('</div>')[0].trim();
+    }
+    // 5. Прямой Base64
+    if (!text.includes('<html') && !text.includes('<body') && text.length > 1) {
+        return text;
+    }
+    return "";
 }
 
 async function testInternet() {
@@ -61,15 +88,13 @@ async function testInternet() {
             const r = await fetch(ipUrl + sep + 't=' + Date.now(), { priority: 'high' });
             if (r && r.ok) {
                 const text = await r.text();
-                let b64 = text;
-                if (text.includes('id="turbo_data">')) {
-                    b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
+                let b64 = extractTurboPayload(text);
+                if (b64) {
+                    const data = JSON.parse(atob(b64));
+                    addLog("✓ [IP СЕРВЕРА] " + data.ip + " (" + (data.country || 'Cloud') + ")", "#00ff66");
+                    if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
+                    return;
                 }
-                const data = JSON.parse(atob(b64));
-                addLog("✓ [IP СЕРВЕРА] " + data.ip + " (" + (data.country || 'Cloud') + ")", "#00ff66");
-                if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
-                workingEndpoint = ep;
-                return;
             }
         } catch(e) { }
     }
@@ -81,29 +106,51 @@ async function sendBatchToServer(b64Data) {
     let lastError = "";
 
     for (let ep of endpoints) {
+        // Попытка 1: Form-Urlencoded POST (100% проходит через Яндекс.Переводчик)
+        try {
+            const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'p=' + encodeURIComponent(b64Data),
+                priority: 'high'
+            });
+            if (postResp && postResp.ok) {
+                const text = await postResp.text();
+                let payload = extractTurboPayload(text);
+                if (payload) {
+                    return { ok: true, payload: payload };
+                }
+            }
+        } catch(postErr) { }
+
+        // Попытка 2: Raw Text POST
         try {
             const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'text/plain' },
                 body: b64Data,
-                priority: 'high',
-                keepalive: true
+                priority: 'high'
             });
             if (postResp && postResp.ok) {
-                workingEndpoint = ep;
                 const text = await postResp.text();
-                return { ok: true, text: text };
+                let payload = extractTurboPayload(text);
+                if (payload) {
+                    return { ok: true, payload: payload };
+                }
             }
-        } catch(postErr) { }
+        } catch(postErr2) { }
 
+        // Попытка 3: GET Запрос
         try {
             let sep = ep.includes('?') ? '&' : '?';
             let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
             const getResp = await fetch(targetUrl, { priority: 'high' });
             if (getResp && getResp.ok) {
-                workingEndpoint = ep;
                 const text = await getResp.text();
-                return { ok: true, text: text };
+                let payload = extractTurboPayload(text);
+                if (payload) {
+                    return { ok: true, payload: payload };
+                }
             } else if (getResp) {
                 lastError = "HTTP " + getResp.status;
             }
@@ -111,7 +158,7 @@ async function sendBatchToServer(b64Data) {
             lastError = getErr.message;
         }
     }
-    return { ok: false, error: lastError };
+    return { ok: false, error: lastError || "Не удалось распаковать ответ" };
 }
 
 async function strictInOrderStreamEngine() {
@@ -119,7 +166,7 @@ async function strictInOrderStreamEngine() {
     const stLocal = document.getElementById('st-local');
     let pollInterval = 10;
 
-    addLog("🚀 Строгий In-Order TLS-движок v26.0 (Zero Corruption & Full UI) запущен.", "#00ff66");
+    addLog("🚀 Яндекс.Транслятор Safe-движок v27.0 (Anti-Corruption Payload) запущен.", "#00ff66");
 
     while (true) {
         try {
@@ -145,7 +192,7 @@ async function strictInOrderStreamEngine() {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН (STRICT IN-ORDER)";
+                stLocal.innerText = "ПОДКЛЮЧЕН (YANDEX-SAFE)";
                 stLocal.style.color = "#00ff66";
             }
 
@@ -155,13 +202,9 @@ async function strictInOrderStreamEngine() {
                 const b64Data = btoa(JSON.stringify(tasks));
                 const res = await sendBatchToServer(b64Data);
 
-                if (res.ok) {
-                    let rawB64 = res.text;
-                    if (res.text.includes('id="turbo_data">')) {
-                        rawB64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
-                    }
+                if (res.ok && res.payload) {
                     try {
-                        const results = JSON.parse(atob(rawB64));
+                        const results = JSON.parse(atob(res.payload));
                         let recvBytes = 0;
                         for (let item of results) {
                             if (item.data && item.data !== "EMPTY") {
@@ -180,7 +223,7 @@ async function strictInOrderStreamEngine() {
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
                             addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
-                            pollInterval = 0; // Нулевая задержка конвейера
+                            pollInterval = 0;
                         } else {
                             pollInterval = 10;
                         }
@@ -220,6 +263,23 @@ class YandexRenderBridgeServer:
         self.total_bytes_tx = 0
         self.start_time = time.time()
 
+    def format_turbo_response(self, b64_data):
+        return (
+            f'<!DOCTYPE html>'
+            f'<html lang="en" translate="no" class="notranslate">'
+            f'<head>'
+            f'<meta charset="UTF-8">'
+            f'<meta name="google" content="notranslate">'
+            f'<meta name="yandex" content="notranslate">'
+            f'<meta name="turbo_payload" content="{b64_data}">'
+            f'</head>'
+            f'<body translate="no" class="notranslate">'
+            f'<textarea id="turbo_area" class="notranslate" translate="no" style="display:none">{b64_data}</textarea>'
+            f'<div id="turbo_div" class="notranslate" translate="no" style="display:none">{b64_data}</div>'
+            f'<script id="turbo_data" translate="no">{b64_data}</script>'
+            f'</body></html>'
+        )
+
     async def handle_ping(self, request):
         cors = {
             'Access-Control-Allow-Origin': '*',
@@ -252,12 +312,12 @@ class YandexRenderBridgeServer:
                     data = await r.json()
                     data["country"] = "Render Cloud"
                     b64 = base64.b64encode(json.dumps(data).encode()).decode()
-                    res_html = f'<html><body><script id="turbo_data">{b64}</script>{json.dumps(data)}</body></html>'
+                    res_html = self.format_turbo_response(b64)
                     return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
             err_data = {"ip": f"Ошибка: {e}"}
             b64 = base64.b64encode(json.dumps(err_data).encode()).decode()
-            res_html = f'<html><body><script id="turbo_data">{b64}</script>{json.dumps(err_data)}</body></html>'
+            res_html = self.format_turbo_response(b64)
             return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def get_dashboard(self, request):
@@ -274,7 +334,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v26.0 (Strict In-Order)</title>
+    <title>⚡ Yandex Relay Bridge v27.0 (Yandex-Safe)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -299,7 +359,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Strict In-Order v26.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Yandex-Safe v27.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -343,19 +403,20 @@ class YandexRenderBridgeServer:
             b64_payload = ""
             if request.method == "POST":
                 try:
-                    raw_body = await request.text()
-                    if raw_body.startswith("p="):
-                        from urllib.parse import unquote
-                        b64_payload = unquote(raw_body[2:])
-                    elif raw_body and not raw_body.startswith("{") and not raw_body.startswith("["):
-                        b64_payload = raw_body.strip()
+                    post_data = await request.post()
+                    if "p" in post_data:
+                        b64_payload = post_data.get("p")
                 except:
                     pass
 
                 if not b64_payload:
                     try:
-                        post_data = await request.post()
-                        b64_payload = post_data.get("p")
+                        raw_body = await request.text()
+                        if raw_body.startswith("p="):
+                            from urllib.parse import unquote
+                            b64_payload = unquote(raw_body[2:])
+                        elif raw_body and not raw_body.startswith("{") and not raw_body.startswith("["):
+                            b64_payload = raw_body.strip()
                     except:
                         pass
 
@@ -363,7 +424,7 @@ class YandexRenderBridgeServer:
                 b64_payload = request.query.get("p")
 
             if not b64_payload:
-                res_html = '<html><body><script id="turbo_data">' + base64.b64encode(b"[]").decode() + '</script></body></html>'
+                res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
                 return web.Response(text=res_html, content_type='text/html', headers=cors)
 
             tasks = json.loads(base64.b64decode(b64_payload).decode('utf-8', 'ignore'))
@@ -373,11 +434,11 @@ class YandexRenderBridgeServer:
                 results.append(res)
 
             resp_b64 = base64.b64encode(json.dumps(results).encode()).decode()
-            res_html = f'<html><body><script id="turbo_data">{resp_b64}</script></body></html>'
+            res_html = self.format_turbo_response(resp_b64)
             return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
             logging.error(f"Error in handle_batch: {e}")
-            res_html = '<html><body><script id="turbo_data">' + base64.b64encode(b"[]").decode() + '</script></body></html>'
+            res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
             return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def process_packet(self, packet):
@@ -522,7 +583,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v26.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v27.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
