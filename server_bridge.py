@@ -17,14 +17,14 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере с защитой от 429 Rate-Limit
+# JavaScript код моста v10.0: Быстрый Hybrid POST/GET транспорт
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
-let pollInterval = 180; // Оптимальный интервал без 429
+let pollInterval = 60; // Высокая скорость отклика (60мс)
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -41,6 +41,14 @@ function addLog(msg, color) {
 function getCandidateEndpoints() {
     if (workingEndpoint) return [workingEndpoint];
     let list = [];
+    
+    // Прямой Render эндпоинт (наивысшая скорость и без лимитов)
+    list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
+    
+    // Относительный путь (если открыто на Render напрямую)
+    list.push('/api/batch');
+    
+    // Внутренний путь через Турбостраницы Яндекса
     let p = (window.location.pathname || '').replace(/\\/+$/, '');
     if (p.includes('proxy_u') || p.includes('turbopages.org')) {
         list.push(window.location.origin + p + '/api/batch');
@@ -49,10 +57,7 @@ function getCandidateEndpoints() {
     if (baseHref.includes('turbopages.org')) {
         list.push(baseHref + '/api/batch');
     }
-    const el = document.getElementById('proxy_path');
-    if (el && el.href) list.push(el.href);
-    list.push('/api/batch');
-    list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
+    
     return Array.from(new Set(list));
 }
 
@@ -89,23 +94,34 @@ async function sendBatchToServer(b64Data) {
     let lastError = "";
 
     for (let ep of endpoints) {
-        let sep = ep.includes('?') ? '&' : '?';
-        let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
-
+        // 1. Пробуем быстрый POST (text/plain не требует OPTIONS предзапросов)
         try {
-            const resp = await fetch(targetUrl, { method: 'GET' });
-            if (resp && resp.ok) {
+            const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: b64Data
+            });
+            if (postResp && postResp.ok) {
                 workingEndpoint = ep;
-                const text = await resp.text();
-                return { ok: true, status: resp.status, text: text, ep: ep };
-            } else if (resp) {
-                lastError = "HTTP " + resp.status;
-                if (resp.status === 429) {
-                    return { ok: false, is429: true, error: "HTTP 429 (Лимит запросов)" };
-                }
+                const text = await postResp.text();
+                return { ok: true, text: text };
             }
-        } catch(e) {
-            lastError = e.message;
+        } catch(postErr) { }
+
+        // 2. Резервный GET
+        try {
+            let sep = ep.includes('?') ? '&' : '?';
+            let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
+            const getResp = await fetch(targetUrl);
+            if (getResp && getResp.ok) {
+                workingEndpoint = ep;
+                const text = await getResp.text();
+                return { ok: true, text: text };
+            } else if (getResp) {
+                lastError = "HTTP " + getResp.status;
+            }
+        } catch(getErr) {
+            lastError = getErr.message;
         }
     }
     return { ok: false, error: lastError };
@@ -115,11 +131,11 @@ async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
-    addLog("🚀 Транспортный движок v9.5 (Rate-Limit Safe) запущен.", "#00ff66");
+    addLog("🚀 Транспортный движок v10.0 (High Speed Turbo) запущен.", "#00ff66");
 
     while (true) {
         try {
-            // 1. Опрос локального клиента
+            // 1. Опрос локального клиента на localhost:8888
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -153,7 +169,6 @@ async function relayLoop() {
                 const res = await sendBatchToServer(b64Data);
 
                 if (res.ok) {
-                    pollInterval = 150; // Быстрый опрос при активном трафике
                     let rawB64 = res.text;
                     if (res.text.includes('id="turbo_data">')) {
                         rawB64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
@@ -188,16 +203,11 @@ async function relayLoop() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    if (res.is429) {
-                        addLog('⏳ Пауза 1.5с (Лимит запросов Яндекс)', '#ffaa00');
-                        await new Promise(r => setTimeout(r, 1500));
-                        pollInterval = 300;
-                    } else {
-                        addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
-                    }
+                    addLog('❌ Ошибка: ' + res.error, '#ff3344');
                 }
+                pollInterval = 50; // Быстрый цикл при передаче
             } else {
-                pollInterval = 500; // Медленный опрос в режиме ожидания
+                pollInterval = 300; // Пауза при простое
             }
         } catch (e) {
             addLog('❌ Сбой: ' + e.message, '#ff3344');
@@ -243,6 +253,9 @@ class YandexRenderBridgeServer:
             'Access-Control-Allow-Headers': '*',
             'Cache-Control': 'no-store, no-cache, must-revalidate'
         }
+        if request.method == "OPTIONS":
+            return web.Response(headers=cors)
+
         try:
             timeout = ClientTimeout(total=5.0)
             async with ClientSession(timeout=timeout) as s:
@@ -250,12 +263,12 @@ class YandexRenderBridgeServer:
                     data = await r.json()
                     data["country"] = "Render Cloud"
                     b64 = base64.b64encode(json.dumps(data).encode()).decode()
-                    res_html = f'<html><body><script id="turbo_data">{b64}</script></body></html>'
+                    res_html = f'<html><body><script id="turbo_data">{b64}</script>{json.dumps(data)}</body></html>'
                     return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
             err_data = {"ip": f"Ошибка: {e}"}
             b64 = base64.b64encode(json.dumps(err_data).encode()).decode()
-            res_html = f'<html><body><script id="turbo_data">{b64}</script></body></html>'
+            res_html = f'<html><body><script id="turbo_data">{b64}</script>{json.dumps(err_data)}</body></html>'
             return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def get_dashboard(self, request):
@@ -272,7 +285,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v9.5</title>
+    <title>⚡ Yandex Relay Bridge v10.0 (High Speed)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -297,7 +310,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v9.5]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[High-Speed Bridge v10.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -341,19 +354,24 @@ class YandexRenderBridgeServer:
         try:
             b64_payload = ""
             if request.method == "POST":
+                # 1. Читаем сырое тело (text/plain или json)
                 try:
-                    post_data = await request.post()
-                    b64_payload = post_data.get("p")
+                    raw_body = await request.text()
+                    if raw_body.startswith("p="):
+                        from urllib.parse import unquote
+                        b64_payload = unquote(raw_body[2:])
+                    elif raw_body and not raw_body.startswith("{") and not raw_body.startswith("["):
+                        b64_payload = raw_body.strip()
                 except:
                     pass
+
                 if not b64_payload:
                     try:
-                        raw_body = await request.text()
-                        if raw_body.startswith("p="):
-                            from urllib.parse import unquote
-                            b64_payload = unquote(raw_body[2:])
+                        post_data = await request.post()
+                        b64_payload = post_data.get("p")
                     except:
                         pass
+
             if not b64_payload:
                 b64_payload = request.query.get("p")
 
@@ -495,7 +513,7 @@ class YandexRenderBridgeServer:
                         logging.info(f"[X] Cleaned session {sid}")
 
     async def run(self):
-        app = web.Application()
+        app = web.Application(client_max_size=10*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
         app.router.add_route('*', '/api/ip', self.handle_get_ip)
@@ -511,7 +529,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v9.5 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v10.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
