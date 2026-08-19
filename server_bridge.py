@@ -53,24 +53,25 @@ function getCandidateEndpoints() {
 function extractTurboPayload(text) {
     if (!text || typeof text !== 'string') return "";
     text = text.trim();
-    
-    // 1. Поиск в meta-теге
-    if (text.includes('name="turbo_payload" content="')) {
-        return text.split('name="turbo_payload" content="')[1].split('"')[0].trim();
-    }
+
+    // 1. Поиск в meta-теге (устойчив к перестановке атрибутов)
+    let m = text.match(/name=["']turbo_payload["']\\s+content=["']([^"']+)["']/i) || 
+            text.match(/content=["']([^"']+)["']\\s+name=["']turbo_payload["']/i);
+    if (m && m[1]) return m[1].trim();
+
     // 2. Поиск в textarea
-    if (text.includes('id="turbo_area">')) {
-        return text.split('id="turbo_area">')[1].split('</textarea>')[0].trim();
-    }
+    let mArea = text.match(/<textarea[^>]*id=["']turbo_area["'][^>]*>([\\s\\S]*?)<\\/textarea>/i);
+    if (mArea && mArea[1]) return mArea[1].trim();
+
     // 3. Поиск в script
-    if (text.includes('id="turbo_data">')) {
-        return text.split('id="turbo_data">')[1].split('</script>')[0].trim();
-    }
+    let mScript = text.match(/<script[^>]*id=["']turbo_data["'][^>]*>([\\s\\S]*?)<\\/script>/i);
+    if (mScript && mScript[1]) return mScript[1].trim();
+
     // 4. Поиск в div
-    if (text.includes('id="turbo_div">')) {
-        return text.split('id="turbo_div">')[1].split('</div>')[0].trim();
-    }
-    // 5. Прямой Base64
+    let mDiv = text.match(/<div[^>]*id=["']turbo_div["'][^>]*>([\\s\\S]*?)<\\/div>/i);
+    if (mDiv && mDiv[1]) return mDiv[1].trim();
+
+    // 5. Прямой Base64 (если сервер вернул чистый base64)
     if (!text.includes('<html') && !text.includes('<body') && text.length > 1) {
         return text;
     }
