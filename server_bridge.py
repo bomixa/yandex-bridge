@@ -17,12 +17,13 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код для моста в браузере с поддержкой GET через Турбостраницы
+# JavaScript код для моста в браузере с детальной диагностикой и мульти-маршрутизацией
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
+let workingEndpoint = null;
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -32,7 +33,7 @@ function addLog(msg, color) {
     if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 80) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 100) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
@@ -56,45 +57,106 @@ function b64_to_utf8(b64) {
     }
 }
 
-function getProxyUrl() {
-    const el = document.getElementById('proxy_path');
-    if (el && el.href && el.href !== "" && el.href !== "about:blank") {
-        return el.href;
+// Поиск всех возможных вариантов маршрута
+function getCandidateEndpoints() {
+    if (workingEndpoint) return [workingEndpoint];
+    let list = [];
+    
+    // 1. Прямой путь внутри Turbopages (origin + pathname)
+    let p = (window.location.pathname || '').replace(/\\/+$/, '');
+    if (p.includes('proxy_u') || p.includes('turbopages.org')) {
+        list.push(window.location.origin + p + '/api/batch');
     }
-    let p = window.location.pathname || '';
-    return p.replace(/\\/+$/, '') + '/api/batch';
+    
+    // 2. Путь через location.href без параметров
+    let baseHref = window.location.href.split('?')[0].replace(/\\/+$/, '');
+    if (baseHref.includes('turbopages.org')) {
+        list.push(baseHref + '/api/batch');
+    }
+    
+    // 3. Через DOM-элемент proxy_path (если он на turbopages)
+    const el = document.getElementById('proxy_path');
+    if (el && el.href) {
+        list.push(el.href);
+    }
+    
+    // 4. Относительный путь
+    list.push('/api/batch');
+    
+    // 5. Прямой URL Render
+    list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
+    
+    // Удаляем дубликаты
+    return Array.from(new Set(list));
 }
 
 async function testInternet() {
     const res = document.getElementById('test-res');
-    if (res) res.innerHTML = "Запрос внешнего IP...";
-    try {
-        const pUrl = getProxyUrl().replace('/api/batch', '/api/ip');
-        const sep = pUrl.includes('?') ? '&' : '?';
-        const r = await fetch(pUrl + sep + 't=' + Date.now()).catch(() => null);
-        if (r && r.ok) {
-            const data = await r.json();
-            if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b> (' + (data.country || 'Cloud') + ')</span>';
-            return;
+    if (res) res.innerHTML = "Диагностика связи...";
+    addLog("🔍 [ДИАГНОСТИКА] Проверка доступных маршрутов...", "#00ff66");
+    
+    const endpoints = getCandidateEndpoints();
+    for (let ep of endpoints) {
+        let ipUrl = ep.replace('/api/batch', '/api/ip');
+        let sep = ipUrl.includes('?') ? '&' : '?';
+        try {
+            addLog("-> Тест эндпоинта: " + ipUrl, "#8fa3bf");
+            const r = await fetch(ipUrl + sep + 't=' + Date.now(), { method: 'GET' });
+            if (r && r.ok) {
+                const data = await r.json();
+                addLog("✓ [УСПЕХ] Эндпоинт работает! IP: " + data.ip, "#00ff66");
+                if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
+                workingEndpoint = ep;
+                return;
+            } else {
+                addLog("✗ [ОТВЕТ] HTTP " + (r ? r.status : 'нет ответа') + " для " + ipUrl, "#ffaa00");
+            }
+        } catch(e) {
+            addLog("✗ [СБОЙ] " + e.message + " (" + ipUrl + ")", "#ff3344");
         }
-        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка получения IP</span>';
-    } catch(e) {
-        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка: ' + e.message + '</span>';
     }
+    if (res) res.innerHTML = '<span style="color:#ff3344">✗ Все маршруты недоступны</span>';
+}
+
+async function sendBatchToServer(b64Data, tasksSummary) {
+    const endpoints = getCandidateEndpoints();
+    let lastError = "";
+
+    for (let ep of endpoints) {
+        let sep = ep.includes('?') ? '&' : '?';
+        let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
+
+        try {
+            const resp = await fetch(targetUrl, { method: 'GET' });
+            if (resp && resp.ok) {
+                workingEndpoint = ep; // Запоминаем рабочий маршрут
+                const text = await resp.text();
+                return { ok: true, text: text, ep: ep };
+            } else if (resp) {
+                lastError = "HTTP " + resp.status + " от " + ep;
+            }
+        } catch(e) {
+            lastError = e.message + " (" + ep + ")";
+        }
+    }
+    return { ok: false, error: lastError };
 }
 
 async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
+    addLog("🚀 [СТАРТ] Движок моста v8.5 запущен. Origin: " + window.location.origin, "#00ff66");
+    addLog("📋 [МАРШРУТЫ] Проверяемые пути: " + JSON.stringify(getCandidateEndpoints()), "#8fa3bf");
+
     while (true) {
         try {
-            // 1. Опрос локального клиента на localhost:8888
+            // 1. Опрос локального клиента
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(responseQueue)
-            }).catch(() => null);
+            }).catch((e) => null);
 
             if (!localResp || !localResp.ok) {
                 if (indLocal) indLocal.className = 'indicator error';
@@ -115,62 +177,55 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Отправка задач на Render через GET (100% совместимо с Турбостраницами Яндекса)
+            // 2. Отправка задач на сервер
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const b64Data = utf8_to_b64(JSON.stringify(tasks));
-                const proxyUrl = getProxyUrl();
-                const sep = proxyUrl.includes('?') ? '&' : '?';
-                const targetUrl = proxyUrl + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
+                const sids = tasks.map(t => t.sid + ':' + (t.t || 'data')).join(', ');
+                
+                const res = await sendBatchToServer(b64Data, sids);
 
-                try {
-                    const serverResp = await fetch(targetUrl);
-
-                    if (serverResp && serverResp.ok) {
-                        const text = await serverResp.text();
-                        let b64 = text;
-                        if (text.includes('id="turbo_data">')) {
-                            b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
-                        }
-                        try {
-                            const jsonStr = b64_to_utf8(b64);
-                            const results = JSON.parse(jsonStr);
-                            for (let res of results) {
-                                if (res.data && res.data !== "EMPTY") {
-                                    responseQueue.push(res);
-                                }
-                                if (res.sid && res.sid !== "IDLE") {
-                                    activeSessions.add(res.sid);
-                                }
-                                packetCount++;
-                                if (res.data && res.data !== "EMPTY") {
-                                    addLog('<b>[' + res.sid + ']</b> ' + (res.type || 'data') + ' ⚡ ' + res.data.length + ' байт');
-                                }
-                            }
-                            totalBytes += b64Data.length;
-                            const bElem = document.getElementById('bytes');
-                            if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                            const pkElem = document.getElementById('pk-count');
-                            if (pkElem) pkElem.innerText = packetCount;
-                            const sessElem = document.getElementById('sess-count');
-                            if (sessElem) sessElem.innerText = activeSessions.size;
-                        } catch(jsonErr) {
-                            addLog('Ошибка JSON: ' + jsonErr.message, '#ff3344');
-                        }
-                    } else {
-                        addLog('Ошибка сервера: HTTP ' + (serverResp ? serverResp.status : 'нет ответа'), '#ff3344');
+                if (res.ok) {
+                    let b64 = res.text;
+                    if (res.text.includes('id="turbo_data">')) {
+                        b64 = res.text.split('id="turbo_data">')[1].split('</script>')[0].trim();
                     }
-                } catch(netErr) {
-                    addLog('Ошибка сети: ' + netErr.message, '#ff3344');
+                    try {
+                        const jsonStr = b64_to_utf8(b64);
+                        const results = JSON.parse(jsonStr);
+                        let recvBytes = 0;
+                        for (let item of results) {
+                            if (item.data && item.data !== "EMPTY") {
+                                responseQueue.push(item);
+                                recvBytes += item.data.length;
+                            }
+                            if (item.sid && item.sid !== "IDLE") {
+                                activeSessions.add(item.sid);
+                            }
+                            packetCount++;
+                        }
+                        totalBytes += b64Data.length;
+                        addLog('<b>[OK]</b> Задачи: [' + sids + '] -> Получено: ' + recvBytes + 'b', recvBytes > 0 ? '#00ff66' : '#8fa3bf');
+                        
+                        const bElem = document.getElementById('bytes');
+                        if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
+                        const pkElem = document.getElementById('pk-count');
+                        if (pkElem) pkElem.innerText = packetCount;
+                        const sessElem = document.getElementById('sess-count');
+                        if (sessElem) sessElem.innerText = activeSessions.size;
+                    } catch(jsonErr) {
+                        addLog('❌ [JSON СБОЙ] ' + jsonErr.message, '#ff3344');
+                    }
+                } else {
+                    addLog('❌ [СЕТЬ] Ошибка пересылки: ' + res.error, '#ff3344');
                 }
             }
         } catch (e) {
-            addLog('Сбой: ' + e.message, '#ff3344');
+            addLog('❌ [ОШИБКА ЦИКЛА] ' + e.message, '#ff3344');
         }
         await new Promise(r => setTimeout(r, 40));
     }
 }
 
-addLog("Транспортный движок туннеля v8.0 готов.");
 relayLoop();
 """
 
@@ -203,19 +258,26 @@ class YandexRenderBridgeServer:
     async def handle_get_ip(self, request):
         cors = {
             'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': '*',
+            'Access-Control-Allow-Private-Network': 'true',
             'Cache-Control': 'no-store, no-cache, must-revalidate'
         }
+        if request.method == "OPTIONS":
+            return web.Response(headers=cors)
+
         try:
             timeout = ClientTimeout(total=5.0)
             async with ClientSession(timeout=timeout) as s:
                 async with s.get('https://api.ipify.org?format=json') as r:
                     data = await r.json()
                     data["country"] = "Render Cloud"
-                    return web.json_response(data, headers=cors)
+                    res_html = f'<html><body><script id="turbo_data">{base64.b64encode(json.dumps(data).encode()).decode()}</script>{json.dumps(data)}</body></html>'
+                    return web.Response(text=res_html, content_type='text/html', headers=cors)
         except Exception as e:
-            return web.json_response({"ip": f"Ошибка: {e}"}, headers=cors)
+            err_data = {"ip": f"Ошибка: {e}"}
+            res_html = f'<html><body><script id="turbo_data">{base64.b64encode(json.dumps(err_data).encode()).decode()}</script>{json.dumps(err_data)}</body></html>'
+            return web.Response(text=res_html, content_type='text/html', headers=cors)
 
     async def get_dashboard(self, request):
         headers = {
@@ -231,7 +293,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v8.0</title>
+    <title>⚡ Yandex Relay Bridge v8.5</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -256,7 +318,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v8.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v8.5]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -445,7 +507,8 @@ class YandexRenderBridgeServer:
         app = web.Application()
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
-        app.router.add_get('/api/ip', self.handle_get_ip)
+        app.router.add_route('*', '/api/ip', self.handle_get_ip)
+        app.router.add_route('*', '/api/ip/{tail:.*}', self.handle_get_ip)
         app.router.add_route('*', '/api/batch', self.handle_batch)
         app.router.add_route('*', '/api/batch/{tail:.*}', self.handle_batch)
         app.router.add_get('/', self.get_dashboard)
@@ -457,7 +520,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v8.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v8.5 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
