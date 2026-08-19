@@ -17,14 +17,13 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# JavaScript код моста v10.0: Быстрый Hybrid POST/GET транспорт
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
 let workingEndpoint = null;
-let pollInterval = 60; // Высокая скорость отклика (60мс)
+let pollInterval = 40;
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -41,23 +40,12 @@ function addLog(msg, color) {
 function getCandidateEndpoints() {
     if (workingEndpoint) return [workingEndpoint];
     let list = [];
-    
-    // Прямой Render эндпоинт (наивысшая скорость и без лимитов)
     list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
-    
-    // Относительный путь (если открыто на Render напрямую)
     list.push('/api/batch');
-    
-    // Внутренний путь через Турбостраницы Яндекса
     let p = (window.location.pathname || '').replace(/\\/+$/, '');
     if (p.includes('proxy_u') || p.includes('turbopages.org')) {
         list.push(window.location.origin + p + '/api/batch');
     }
-    let baseHref = window.location.href.split('?')[0].replace(/\\/+$/, '');
-    if (baseHref.includes('turbopages.org')) {
-        list.push(baseHref + '/api/batch');
-    }
-    
     return Array.from(new Set(list));
 }
 
@@ -94,7 +82,6 @@ async function sendBatchToServer(b64Data) {
     let lastError = "";
 
     for (let ep of endpoints) {
-        // 1. Пробуем быстрый POST (text/plain не требует OPTIONS предзапросов)
         try {
             const postResp = await fetch(ep + (ep.includes('?') ? '&' : '?') + 't=' + Date.now(), {
                 method: 'POST',
@@ -108,7 +95,6 @@ async function sendBatchToServer(b64Data) {
             }
         } catch(postErr) { }
 
-        // 2. Резервный GET
         try {
             let sep = ep.includes('?') ? '&' : '?';
             let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
@@ -131,11 +117,10 @@ async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
-    addLog("🚀 Транспортный движок v10.0 (High Speed Turbo) запущен.", "#00ff66");
+    addLog("🚀 Транспортный движок v12.0 (TLS/SSL Safe) запущен.", "#00ff66");
 
     while (true) {
         try {
-            // 1. Опрос локального клиента на localhost:8888
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -161,11 +146,8 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Отправка задач на Render
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const b64Data = btoa(JSON.stringify(tasks));
-                const sids = tasks.map(t => t.sid + ':' + (t.t || 'data')).join(', ');
-                
                 const res = await sendBatchToServer(b64Data);
 
                 if (res.ok) {
@@ -179,7 +161,9 @@ async function relayLoop() {
                         for (let item of results) {
                             if (item.data && item.data !== "EMPTY") {
                                 responseQueue.push(item);
-                                recvBytes += item.data.length;
+                                if (item.data !== "EOF") {
+                                    recvBytes += item.data.length;
+                                }
                             }
                             if (item.data === "EOF" || item.type === "close") {
                                 activeSessions.delete(item.sid);
@@ -190,7 +174,7 @@ async function relayLoop() {
                         }
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
-                            addLog('⚡ <b>[' + sids + ']</b> Получено: ' + recvBytes + 'b', '#00ff66');
+                            addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
                         }
                         
                         const bElem = document.getElementById('bytes');
@@ -203,11 +187,11 @@ async function relayLoop() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    addLog('❌ Ошибка: ' + res.error, '#ff3344');
+                    addLog('❌ Ошибка связи: ' + res.error, '#ff3344');
                 }
-                pollInterval = 50; // Быстрый цикл при передаче
+                pollInterval = 30;
             } else {
-                pollInterval = 300; // Пауза при простое
+                pollInterval = 250;
             }
         } catch (e) {
             addLog('❌ Сбой: ' + e.message, '#ff3344');
@@ -285,7 +269,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v10.0 (High Speed)</title>
+    <title>⚡ Yandex Relay Bridge v12.0 (TLS Safe)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -310,11 +294,10 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[High-Speed Bridge v10.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[TLS Safe Bridge v12.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
-    <!-- Резолвер адреса Яндекс-прокси -->
     <a id="proxy_path" href="/api/batch" style="display:none"></a>
 
     <div class="grid">
@@ -354,7 +337,6 @@ class YandexRenderBridgeServer:
         try:
             b64_payload = ""
             if request.method == "POST":
-                # 1. Читаем сырое тело (text/plain или json)
                 try:
                     raw_body = await request.text()
                     if raw_body.startswith("p="):
@@ -439,10 +421,11 @@ class YandexRenderBridgeServer:
                 del self.pending_buffers[sid]
             return {"sid": sid, "data": "EOF", "type": "close"}
 
+        # Читаем буфер только для poll/data
         if sid in self.sessions:
             async with self.buffer_lock:
                 self.sessions[sid]['last_poll'] = time.time()
-                if self.sessions[sid]['buffer']:
+                if len(self.sessions[sid]['buffer']) > 0:
                     resp_data = base64.b64encode(self.sessions[sid]['buffer']).decode()
                     self.total_bytes_tx += len(self.sessions[sid]['buffer'])
                     self.sessions[sid]['buffer'] = bytearray()
@@ -454,7 +437,6 @@ class YandexRenderBridgeServer:
 
     async def open_connection(self, sid, addr, port):
         try:
-            logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
             r, w = await asyncio.wait_for(
                 asyncio.open_connection(addr, port, family=socket.AF_INET),
                 timeout=8.0
@@ -473,15 +455,14 @@ class YandexRenderBridgeServer:
                 del self.pending_buffers[sid]
 
             asyncio.create_task(self.read_remote(sid, r))
-            logging.info(f"[+] [{sid}] Connected to {addr}:{port}")
         except Exception as e:
-            logging.error(f"[-] [{sid}] Connection failed ({addr}:{port}): {e}")
+            logging.error(f"[-] [{sid}] Connect failed ({addr}:{port}): {e}")
 
     async def read_remote(self, sid, reader):
         try:
             while sid in self.sessions and self.sessions[sid]['active']:
                 try:
-                    data = await asyncio.wait_for(reader.read(16384), timeout=0.5)
+                    data = await asyncio.wait_for(reader.read(65536), timeout=0.5)
                     if not data:
                         break
                     async with self.buffer_lock:
@@ -502,7 +483,7 @@ class YandexRenderBridgeServer:
             await asyncio.sleep(15)
             now = time.time()
             async with self.buffer_lock:
-                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30]
+                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30 and len(s['buffer']) == 0]
                 for sid in to_del:
                     if sid in self.sessions:
                         try:
@@ -510,10 +491,9 @@ class YandexRenderBridgeServer:
                         except:
                             pass
                         del self.sessions[sid]
-                        logging.info(f"[X] Cleaned session {sid}")
 
     async def run(self):
-        app = web.Application(client_max_size=10*1024*1024)
+        app = web.Application(client_max_size=20*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
         app.router.add_route('*', '/api/ip', self.handle_get_ip)
@@ -529,7 +509,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v10.0 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v12.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
