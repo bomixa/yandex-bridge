@@ -5,9 +5,8 @@ import logging
 import os
 import socket
 import time
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 
-# Render.com передает порт через переменную окружения PORT
 LISTEN_PORT = int(os.environ.get("PORT", 8181))
 
 logging.basicConfig(
@@ -18,55 +17,78 @@ logging.basicConfig(
 logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 
-# Чистый JavaScript код ретранслятора
+# JavaScript код для моста в браузере
 JS_ENGINE_CODE = """
 let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
-let cachedProxyUrl = null;
 
-function addLog(msg) {
+function addLog(msg, color) {
     const log = document.getElementById('log');
     if (!log) return;
     const d = document.createElement('div');
     d.className = 'packet';
+    if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 60) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 70) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
-function getProxyUrl() {
-    if (cachedProxyUrl) return cachedProxyUrl;
-    let path = window.location.pathname || '';
-    path = path.replace(/\\/+$/, '');
-    if (path.includes('proxy_u') || path.includes('turbopages.org') || path.includes('translate')) {
-        cachedProxyUrl = path + '/api/batch';
-    } else {
-        cachedProxyUrl = '/api/batch';
+// Автоматический выбор рабочего URL для отправки пакетов
+function getTargetEndpoints() {
+    let endpoints = [];
+    // 1. Прямой CORS запрос к Render
+    endpoints.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
+    // 2. Относительный путь (для прямого открытия)
+    endpoints.push('/api/batch');
+    // 3. Путь через прокси Яндекс
+    let path = (window.location.pathname || '').replace(/\\/+$/, '');
+    if (path.includes('proxy_u') || path.includes('turbopages.org')) {
+        endpoints.push(path + '/api/batch');
     }
-    return cachedProxyUrl;
+    return endpoints;
 }
 
 async function testInternet() {
     const res = document.getElementById('test-res');
-    if (res) res.innerText = "Проверка...";
+    if (res) res.innerHTML = "Запрос внешнего IP...";
     try {
-        const r = await fetch('https://api.ipify.org?format=json');
-        const data = await r.json();
-        if (res) {
-            res.innerHTML = '<span style="color:#00ff66">✓ IP Сервера: <b>' + data.ip + '</b></span>';
+        // Проверяем IP через серверный эндпоинт Render
+        const r = await fetch('https://yandex-bridge-dlc6.onrender.com/api/ip').catch(() => null);
+        if (r && r.ok) {
+            const data = await r.json();
+            if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b> (' + (data.country || 'Cloud') + ')</span>';
+            return;
         }
+        // Резервная проверка через ipify
+        const r2 = await fetch('https://api.ipify.org?format=json');
+        const data2 = await r2.json();
+        if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP: <b>' + data2.ip + '</b></span>';
     } catch(e) {
-        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка внешнего IP</span>';
+        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка проверки: ' + e.message + '</span>';
     }
+}
+
+async function sendToServer(payload) {
+    const endpoints = getTargetEndpoints();
+    for (let url of endpoints) {
+        try {
+            const resp = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: payload
+            });
+            if (resp && resp.ok) return resp;
+        } catch(e) { }
+    }
+    return null;
 }
 
 async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    const proxyUrl = getProxyUrl();
 
     while (true) {
         try {
@@ -96,24 +118,10 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
-            // 2. Отправка задач на Render через Яндекс-мост
+            // 2. Пересылка задач на Render
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const payload = "p=" + encodeURIComponent(btoa(JSON.stringify(tasks)));
-                let serverResp = null;
-                
-                try {
-                    serverResp = await fetch(proxyUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: payload
-                    });
-                } catch(netErr) {
-                    serverResp = await fetch('/api/batch', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                        body: payload
-                    }).catch(e => null);
-                }
+                const serverResp = await sendToServer(payload);
 
                 if (serverResp && serverResp.ok) {
                     const text = await serverResp.text();
@@ -131,9 +139,7 @@ async function relayLoop() {
                                 activeSessions.add(res.sid);
                             }
                             packetCount++;
-                            if (res.data && res.data !== "EMPTY") {
-                                addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + ' ⚡ ' + res.data.length + 'b');
-                            }
+                            addLog('<b>[' + res.sid + ']</b> ' + (res.type || 'data') + (res.data && res.data !== 'EMPTY' ? ' ⚡ ' + res.data.length + ' байт' : ''));
                         }
                         totalBytes += payload.length;
                         const bElem = document.getElementById('bytes');
@@ -142,17 +148,21 @@ async function relayLoop() {
                         if (pkElem) pkElem.innerText = packetCount;
                         const sessElem = document.getElementById('sess-count');
                         if (sessElem) sessElem.innerText = activeSessions.size;
-                    } catch(jsonErr) { }
+                    } catch(jsonErr) {
+                        addLog('Ошибка парсинга ответа: ' + jsonErr.message, '#ff3344');
+                    }
+                } else {
+                    addLog('Ошибка отправки пакетов на Render-сервер', '#ff3344');
                 }
             }
         } catch (e) {
-            console.error("Relay loop error:", e);
+            addLog('Сбой цикла: ' + e.message, '#ff3344');
         }
         await new Promise(r => setTimeout(r, 40));
     }
 }
 
-addLog("Транспортный движок туннеля v6.5 запущен.");
+addLog("Транспортный движок туннеля v7.0 готов.");
 relayLoop();
 """
 
@@ -181,8 +191,24 @@ class YandexRenderBridgeServer:
             "timestamp": time.time()
         }, headers=cors)
 
+    async def handle_get_ip(self, request):
+        """Определение внешнего IP на стороне сервера"""
+        cors = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': '*',
+            'Access-Control-Allow-Headers': '*'
+        }
+        try:
+            timeout = ClientTimeout(total=5.0)
+            async with ClientSession(timeout=timeout) as s:
+                async with s.get('https://api.ipify.org?format=json') as r:
+                    data = await r.json()
+                    data["country"] = "Render Cloud"
+                    return web.json_response(data, headers=cors)
+        except Exception as e:
+            return web.json_response({"ip": f"Ошибка: {e}"}, headers=cors)
+
     async def get_dashboard(self, request):
-        """Главная веб-страница, защищенная от автоперевода Яндекс.Переводчиком"""
         html = f"""<!DOCTYPE html>
 <html lang="en" translate="no" class="notranslate">
 <head>
@@ -216,7 +242,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.5]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v7.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -231,12 +257,11 @@ class YandexRenderBridgeServer:
             <div class="stat"><span>Обработано пакетов:</span> <b id="pk-count">0</b></div>
             <div class="stat"><span>Активные сессии:</span> <b id="sess-count">0</b></div>
             <hr style="border:0; border-top:1px solid #1a2332; margin: 15px 0;">
-            <button onclick="testInternet()">🔍 ПРОВЕРИТЬ ИНТЕРНЕТ СЕРВЕРА</button>
+            <button onclick="testInternet()">🔍 ПРОВЕРИТЬ ВНЕШНИЙ IP СЕРВЕРА</button>
             <div id="test-res" style="margin-top:10px; font-size:12px; color:#8fa3bf; text-align:center;"></div>
         </div>
     </div>
 
-    <!-- Защищенный запуск JavaScript через Base64 -->
     <script translate="no" class="notranslate">
         eval(decodeURIComponent(escape(atob("{JS_BASE64}"))));
     </script>
@@ -303,7 +328,6 @@ class YandexRenderBridgeServer:
                 addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
                 port = int(info['port'])
                 await self.open_connection(sid, addr, port)
-                # Возвращаем EMPTY, чтобы не отправлять текстовые строки в сокет клиента
                 return {"sid": sid, "data": "EMPTY", "type": "connect"}
             except Exception as e:
                 logging.error(f"[{sid}] Connect parse error: {e}")
@@ -343,7 +367,7 @@ class YandexRenderBridgeServer:
         return {"sid": sid, "data": resp_data, "type": p_type}
 
     async def open_connection(self, sid, addr, port):
-        """Исходящее TCP соединение во внешний интернет с хоста Render"""
+        """Исходящее TCP соединение во внешний интернет"""
         try:
             logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
             r, w = await asyncio.wait_for(
@@ -401,6 +425,7 @@ class YandexRenderBridgeServer:
         app = web.Application()
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
+        app.router.add_get('/api/ip', self.handle_get_ip)
         app.router.add_route('*', '/api/batch', self.handle_batch)
         app.router.add_route('*', '/api/batch/{tail:.*}', self.handle_batch)
         app.router.add_get('/', self.get_dashboard)
@@ -412,7 +437,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v6.5 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v7.0 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
