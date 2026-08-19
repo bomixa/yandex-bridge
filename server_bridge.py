@@ -24,6 +24,7 @@ let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
+let cachedProxyUrl = null;
 
 function addLog(msg) {
     const log = document.getElementById('log');
@@ -32,34 +33,45 @@ function addLog(msg) {
     d.className = 'packet';
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 50) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 60) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
+}
+
+function getProxyUrl() {
+    if (cachedProxyUrl) return cachedProxyUrl;
+    // 1. Вычисляем путь внутри прокси Яндекс.Переводчика (turbopages.org)
+    let path = window.location.pathname || '';
+    path = path.replace(/\\/+$/, '');
+    if (path.includes('proxy_u') || path.includes('turbopages.org') || path.includes('translate')) {
+        cachedProxyUrl = path + '/api/batch';
+    } else {
+        cachedProxyUrl = '/api/batch';
+    }
+    return cachedProxyUrl;
 }
 
 async function testInternet() {
     const res = document.getElementById('test-res');
-    if (res) res.innerText = "Checking...";
+    if (res) res.innerText = "Проверка...";
     try {
         const r = await fetch('https://api.ipify.org?format=json');
         const data = await r.json();
         if (res) {
-            res.innerHTML = '<span style="color:#00ff66">✓ IP: <b>' + data.ip + '</b></span>';
+            res.innerHTML = '<span style="color:#00ff66">✓ IP Сервера: <b>' + data.ip + '</b></span>';
         }
     } catch(e) {
-        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Error</span>';
+        if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка внешнего IP</span>';
     }
 }
 
 async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    const proxyForm = document.getElementById('proxy_form');
-    let proxyUrl = proxyForm ? proxyForm.action : '/api/batch';
-    if (!proxyUrl || proxyUrl === "") proxyUrl = "/api/batch";
+    const proxyUrl = getProxyUrl();
 
     while (true) {
         try {
-            // Опрос локального клиента
+            // 1. Опрос локального клиента на localhost:8888
             const localResp = await fetch('http://localhost:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -85,38 +97,59 @@ async function relayLoop() {
 
             const tasks = await localResp.json();
 
+            // 2. Отправка задач на Render через Яндекс-мост
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
                 const payload = "p=" + encodeURIComponent(btoa(JSON.stringify(tasks)));
-                const serverResp = await fetch(proxyUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: payload
-                });
+                let serverResp = null;
+                
+                try {
+                    serverResp = await fetch(proxyUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: payload
+                    });
+                } catch(netErr) {
+                    // Резервный маршрут: относительный путь
+                    serverResp = await fetch('/api/batch', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: payload
+                    }).catch(e => {
+                        addLog('<span style="color:#ff3344">Ошибка отправки: ' + e.message + '</span>');
+                        return null;
+                    });
+                }
 
-                if (serverResp.ok) {
+                if (serverResp && serverResp.ok) {
                     const text = await serverResp.text();
                     let b64 = text;
                     if (text.includes('id="turbo_data">')) {
                         b64 = text.split('id="turbo_data">')[1].split('</script>')[0].trim();
                     }
-                    const results = JSON.parse(atob(b64));
-                    for (let res of results) {
-                        if (res.data && res.data !== "EMPTY") {
-                            responseQueue.push(res);
+                    try {
+                        const results = JSON.parse(atob(b64));
+                        for (let res of results) {
+                            if (res.data && res.data !== "EMPTY") {
+                                responseQueue.push(res);
+                            }
+                            if (res.sid && res.sid !== "IDLE") {
+                                activeSessions.add(res.sid);
+                            }
+                            packetCount++;
+                            addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + (res.data && res.data !== 'EMPTY' ? ' ⚡ ' + res.data.length + 'b' : ''));
                         }
-                        if (res.sid && res.sid !== "IDLE") {
-                            activeSessions.add(res.sid);
-                        }
-                        packetCount++;
-                        addLog('<b>' + res.sid + '</b> | ' + (res.type || 'data') + (res.data && res.data !== 'EMPTY' ? ' ⚡ ' + res.data.length + 'b' : ''));
+                        totalBytes += payload.length;
+                        const bElem = document.getElementById('bytes');
+                        if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
+                        const pkElem = document.getElementById('pk-count');
+                        if (pkElem) pkElem.innerText = packetCount;
+                        const sessElem = document.getElementById('sess-count');
+                        if (sessElem) sessElem.innerText = activeSessions.size;
+                    } catch(jsonErr) {
+                        addLog('<span style="color:#ff3344">Ошибка разбора ответа: ' + jsonErr.message + '</span>');
                     }
-                    totalBytes += payload.length;
-                    const bElem = document.getElementById('bytes');
-                    if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                    const pkElem = document.getElementById('pk-count');
-                    if (pkElem) pkElem.innerText = packetCount;
-                    const sessElem = document.getElementById('sess-count');
-                    if (sessElem) sessElem.innerText = activeSessions.size;
+                } else if (serverResp) {
+                    addLog('<span style="color:#ff3344">Сервер ответил HTTP ' + serverResp.status + ' (' + proxyUrl + ')</span>');
                 }
             }
         } catch (e) {
@@ -126,7 +159,7 @@ async function relayLoop() {
     }
 }
 
-addLog("Транспортный движок туннеля запущен.");
+addLog("Транспортный движок туннеля v6.3 запущен.");
 relayLoop();
 """
 
@@ -190,12 +223,9 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.2]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Turbo Bridge v6.3]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
-
-    <!-- Скрытая форма для вычисления прокси-пути через Яндекс -->
-    <form id="proxy_form" action="/api/batch" method="POST" style="display:none"></form>
 
     <div class="grid">
         <div id="log"></div>
@@ -213,7 +243,7 @@ class YandexRenderBridgeServer:
         </div>
     </div>
 
-    <!-- Защищенный запуск JavaScript через Base64 без возможности перевода -->
+    <!-- Защищенный запуск JavaScript через Base64 -->
     <script translate="no" class="notranslate">
         eval(decodeURIComponent(escape(atob("{JS_BASE64}"))));
     </script>
@@ -319,7 +349,7 @@ class YandexRenderBridgeServer:
         return {"sid": sid, "data": resp_data, "type": p_type}
 
     async def open_connection(self, sid, addr, port):
-        """Исходящее соединение во внешний интернет с хоста Render"""
+        """Исходящее TCP соединение в большой интернет"""
         try:
             logging.info(f"[*] [{sid}] Connecting to {addr}:{port}...")
             r, w = await asyncio.wait_for(
@@ -378,6 +408,7 @@ class YandexRenderBridgeServer:
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
         app.router.add_route('*', '/api/batch', self.handle_batch)
+        app.router.add_route('*', '/api/batch/{tail:.*}', self.handle_batch)
         app.router.add_get('/', self.get_dashboard)
         app.router.add_get('/{tail:.*}', self.get_dashboard)
 
@@ -387,7 +418,7 @@ class YandexRenderBridgeServer:
         await site.start()
 
         logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v6.2 READY ON PORT {LISTEN_PORT}")
+        logging.info(f"🚀 RENDER BRIDGE SERVER v6.3 READY ON PORT {LISTEN_PORT}")
         logging.info(f"==================================================")
         await self.session_cleaner()
 
