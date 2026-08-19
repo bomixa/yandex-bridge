@@ -117,7 +117,7 @@ async function relayLoop() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
 
-    addLog("🚀 Транспортный движок v12.0 (TLS/SSL Safe) запущен.", "#00ff66");
+    addLog("🚀 Транспортный движок v14.0 (Ultra-Fast Turbo) запущен.", "#00ff66");
 
     while (true) {
         try {
@@ -272,7 +272,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v12.0 (TLS Safe)</title>
+    <title>⚡ Yandex Relay Bridge v14.0 (Ultra-Fast Turbo)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -297,7 +297,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[TLS Safe Bridge v12.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Ultra-Fast Turbo v14.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
