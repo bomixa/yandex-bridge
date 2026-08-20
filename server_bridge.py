@@ -251,11 +251,16 @@ class YandexRenderBridgeServer:
         self.sessions = {}
         self.pending_buffers = {}
         self.chunk_assembler = {}
-        self.buffer_lock = asyncio.Lock()
+        self.buffer_lock = None
         self.total_bytes_rx = 0
         self.total_bytes_tx = 0
         self.start_time = time.time()
         self.cleaner_task = None
+
+    def get_lock(self):
+        if self.buffer_lock is None:
+            self.buffer_lock = asyncio.Lock()
+        return self.buffer_lock
 
     def format_turbo_response(self, b64_data):
         return (
@@ -399,7 +404,6 @@ class YandexRenderBridgeServer:
             total = request.query.get("total")
             b64_payload = request.query.get("p", "")
 
-            # Сборка многосегментного микро-чанка
             if cid and idx is not None and total is not None:
                 idx = int(idx)
                 total = int(total)
@@ -480,7 +484,7 @@ class YandexRenderBridgeServer:
             return {"sid": sid, "data": "EOF", "type": "close"}
 
         if sid in self.sessions:
-            async with self.buffer_lock:
+            async with self.get_lock():
                 self.sessions[sid]['last_poll'] = time.time()
                 if len(self.sessions[sid]['buffer']) > 0:
                     resp_data = base64.b64encode(self.sessions[sid]['buffer']).decode()
@@ -531,7 +535,7 @@ class YandexRenderBridgeServer:
                     data = await asyncio.wait_for(reader.read(1048576), timeout=0.25)
                     if not data:
                         break
-                    async with self.buffer_lock:
+                    async with self.get_lock():
                         if sid in self.sessions:
                             self.sessions[sid]['buffer'].extend(data)
                 except asyncio.TimeoutError:
@@ -549,7 +553,7 @@ class YandexRenderBridgeServer:
             try:
                 await asyncio.sleep(15)
                 now = time.time()
-                async with self.buffer_lock:
+                async with self.get_lock():
                     to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30 and len(s['buffer']) == 0]
                     for sid in to_del:
                         if sid in self.sessions:
@@ -558,7 +562,6 @@ class YandexRenderBridgeServer:
                             except:
                                 pass
                             del self.sessions[sid]
-                    # Очистка устаревших чанков
                     expired_cids = [c for c, obj in self.chunk_assembler.items() if now - obj['time'] > 20]
                     for c in expired_cids:
                         del self.chunk_assembler[c]
@@ -568,6 +571,7 @@ class YandexRenderBridgeServer:
                 logging.error(f"Error in session_cleaner: {e}")
 
     async def on_startup(self, app):
+        self.buffer_lock = asyncio.Lock()
         self.cleaner_task = asyncio.create_task(self.session_cleaner())
 
     async def on_cleanup(self, app):
