@@ -108,7 +108,6 @@ async function sendBatchToServer(b64Data) {
     const endpoints = getCandidateEndpoints();
     let lastError = "";
 
-    // Мелкие куски (до 700 байт) отправляем за 1 GET запрос
     const CHUNK_LEN = 700;
     const cid = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
@@ -118,7 +117,6 @@ async function sendBatchToServer(b64Data) {
             let finalPayload = "";
             let sep = ep.includes('?') ? '&' : '?';
 
-            // Если пакет маленький (1 кусок)
             if (totalChunks <= 1) {
                 let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
                 const resp = await fetch(targetUrl, { priority: 'high' });
@@ -129,7 +127,6 @@ async function sendBatchToServer(b64Data) {
                     lastError = "HTTP " + resp.status;
                 }
             } else {
-                // Если пакет большой (дробим на микро-чанки по 700 байт для Яндекс.Переводчика)
                 for (let i = 0; i < totalChunks; i++) {
                     let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
                     let targetUrl = ep + sep + 'cid=' + cid + '&idx=' + i + '&total=' + totalChunks + '&p=' + encodeURIComponent(slice) + '&t=' + Date.now();
@@ -253,11 +250,12 @@ class YandexRenderBridgeServer:
     def __init__(self):
         self.sessions = {}
         self.pending_buffers = {}
-        self.chunk_assembler = {}  # cid -> {'chunks': {}, 'total': N, 'time': t}
+        self.chunk_assembler = {}
         self.buffer_lock = asyncio.Lock()
         self.total_bytes_rx = 0
         self.total_bytes_tx = 0
         self.start_time = time.time()
+        self.cleaner_task = None
 
     def format_turbo_response(self, b64_data):
         return (
@@ -414,7 +412,6 @@ class YandexRenderBridgeServer:
                     del self.chunk_assembler[cid]
                     b64_payload = full_p
                 else:
-                    # Промежуточный чанк принят
                     res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
                     return web.Response(text=res_html, content_type='text/html', headers=cors)
 
@@ -549,23 +546,35 @@ class YandexRenderBridgeServer:
 
     async def session_cleaner(self):
         while True:
-            await asyncio.sleep(15)
-            now = time.time()
-            async with self.buffer_lock:
-                to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30 and len(s['buffer']) == 0]
-                for sid in to_del:
-                    if sid in self.sessions:
-                        try:
-                            self.sessions[sid]['w'].close()
-                        except:
-                            pass
-                        del self.sessions[sid]
-                # Очистка устаревших чанков
-                expired_cids = [c for c, obj in self.chunk_assembler.items() if now - obj['time'] > 20]
-                for c in expired_cids:
-                    del self.chunk_assembler[c]
+            try:
+                await asyncio.sleep(15)
+                now = time.time()
+                async with self.buffer_lock:
+                    to_del = [sid for sid, s in self.sessions.items() if now - s['last_poll'] > 30 and len(s['buffer']) == 0]
+                    for sid in to_del:
+                        if sid in self.sessions:
+                            try:
+                                self.sessions[sid]['w'].close()
+                            except:
+                                pass
+                            del self.sessions[sid]
+                    # Очистка устаревших чанков
+                    expired_cids = [c for c, obj in self.chunk_assembler.items() if now - obj['time'] > 20]
+                    for c in expired_cids:
+                        del self.chunk_assembler[c]
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"Error in session_cleaner: {e}")
 
-    async def run(self):
+    async def on_startup(self, app):
+        self.cleaner_task = asyncio.create_task(self.session_cleaner())
+
+    async def on_cleanup(self, app):
+        if self.cleaner_task:
+            self.cleaner_task.cancel()
+
+    def create_app(self):
         app = web.Application(client_max_size=50*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
@@ -575,20 +584,15 @@ class YandexRenderBridgeServer:
         app.router.add_route('*', '/api/batch/{tail:.*}', self.handle_batch)
         app.router.add_get('/', self.get_dashboard)
         app.router.add_get('/{tail:.*}', self.get_dashboard)
-
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', LISTEN_PORT)
-        await site.start()
-
-        logging.info(f"==================================================")
-        logging.info(f"🚀 RENDER BRIDGE SERVER v28.0 READY ON PORT {LISTEN_PORT}")
-        logging.info(f"==================================================")
-        await self.session_cleaner()
+        app.on_startup.append(self.on_startup)
+        app.on_cleanup.append(self.on_cleanup)
+        return app
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(YandexRenderBridgeServer().run())
-    except KeyboardInterrupt:
-        pass
+    server = YandexRenderBridgeServer()
+    app = server.create_app()
+    logging.info(f"==================================================")
+    logging.info(f"🚀 RENDER BRIDGE SERVER v28.0 READY ON PORT {LISTEN_PORT}")
+    logging.info(f"==================================================")
+    web.run_app(app, host='0.0.0.0', port=LISTEN_PORT, access_log=None)
