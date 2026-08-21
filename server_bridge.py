@@ -20,9 +20,13 @@ logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
 
 JS_ENGINE_CODE = """
 let responseQueue = [];
-let totalBytes = 0;
+let bytesTx = 0; // Отдано на Render (Upload)
+let bytesRx = 0; // Получено с Render (Download)
 let packetCount = 0;
 let activeSessions = new Set();
+let lastSpeedTime = Date.now();
+let lastRxBytes = 0;
+let lastTxBytes = 0;
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -32,7 +36,7 @@ function addLog(msg, color) {
     if (color) d.style.color = color;
     d.innerHTML = '<span class="time">[' + new Date().toLocaleTimeString() + ']</span> ' + msg;
     log.appendChild(d);
-    if (log.childNodes.length > 80) log.removeChild(log.firstChild);
+    if (log.childNodes.length > 100) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
 
@@ -46,24 +50,23 @@ function extractTurboPayload(text) {
     if (!text || typeof text !== 'string') return "";
     text = text.trim();
 
-    // 1. Поиск в meta-теге (устойчив к перестановке атрибутов Яндексом)
+    // 1. Meta-тег
     let m = text.match(/name=["']turbo_payload["']\\s+content=["']([^"']+)["']/i) || 
             text.match(/content=["']([^"']+)["']\\s+name=["']turbo_payload["']/i);
     if (m && m[1]) return m[1].trim();
 
-    // 2. Поиск в textarea
+    // 2. Textarea
     let mArea = text.match(/<textarea[^>]*id=["']turbo_area["'][^>]*>([\\s\\S]*?)<\\/textarea>/i);
     if (mArea && mArea[1]) return mArea[1].trim();
 
-    // 3. Поиск в script
+    // 3. Script
     let mScript = text.match(/<script[^>]*id=["']turbo_data["'][^>]*>([\\s\\S]*?)<\\/script>/i);
     if (mScript && mScript[1]) return mScript[1].trim();
 
-    // 4. Поиск в div
+    // 4. Div
     let mDiv = text.match(/<div[^>]*id=["']turbo_div["'][^>]*>([\\s\\S]*?)<\\/div>/i);
     if (mDiv && mDiv[1]) return mDiv[1].trim();
 
-    // 5. Прямой Base64
     if (!text.includes('<html') && !text.includes('<body') && text.length > 1) {
         return text;
     }
@@ -111,7 +114,6 @@ async function sendBatchToServer(b64Data) {
                 if (payload) return { ok: true, payload: payload };
             }
         } else {
-            // Параллельная отправка всех микро-чанков одновременно (Zero Lag)
             let fetchPromises = [];
             for (let i = 0; i < totalChunks; i++) {
                 let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
@@ -124,7 +126,7 @@ async function sendBatchToServer(b64Data) {
             for (let text of responses) {
                 if (text) {
                     let payload = extractTurboPayload(text);
-                    if (payload && payload !== "W10=") { // Игнорируем пустой base64 "[]"
+                    if (payload && payload !== "W10=") {
                         return { ok: true, payload: payload };
                     }
                 }
@@ -136,12 +138,39 @@ async function sendBatchToServer(b64Data) {
     return { ok: false, error: "Нет ответа" };
 }
 
+function updateTelemetryUI() {
+    const txElem = document.getElementById('bytes-tx');
+    if (txElem) txElem.innerText = (bytesTx > 1024 * 1024) ? (bytesTx / 1048576).toFixed(2) + " MB" : (bytesTx / 1024).toFixed(1) + " KB";
+    
+    const rxElem = document.getElementById('bytes-rx');
+    if (rxElem) rxElem.innerText = (bytesRx > 1024 * 1024) ? (bytesRx / 1048576).toFixed(2) + " MB" : (bytesRx / 1024).toFixed(1) + " KB";
+
+    const pkElem = document.getElementById('pk-count');
+    if (pkElem) pkElem.innerText = packetCount;
+
+    const sessElem = document.getElementById('sess-count');
+    if (sessElem) sessElem.innerText = activeSessions.size;
+
+    // Скорость в реальном времени
+    const now = Date.now();
+    const dt = (now - lastSpeedTime) / 1000;
+    if (dt >= 1.0) {
+        const speedRx = ((bytesRx - lastRxBytes) / 1024 / dt).toFixed(1);
+        const speedTx = ((bytesTx - lastTxBytes) / 1024 / dt).toFixed(1);
+        const spElem = document.getElementById('speed-live');
+        if (spElem) spElem.innerText = "⬇ " + speedRx + " KB/s | ⬆ " + speedTx + " KB/s";
+        lastSpeedTime = now;
+        lastRxBytes = bytesRx;
+        lastTxBytes = bytesTx;
+    }
+}
+
 async function yandexTurboZeroLagEngine() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
     let pollInterval = 5;
 
-    addLog("🚀 Яндекс.Транслятор v29.0 (Zero-Lag Parallel Chunks) запущен.", "#00ff66");
+    addLog("🚀 Яндекс.Транслятор v30.0 (Full Telemetry & TX/RX Inspector) запущен.", "#00ff66");
 
     while (true) {
         try {
@@ -174,6 +203,23 @@ async function yandexTurboZeroLagEngine() {
             const tasks = await localResp.json();
 
             if (tasks && tasks.length > 0 && tasks[0].sid !== "IDLE") {
+                // Подсчет отдачи (TX)
+                let txDataBytes = 0;
+                let txConnects = 0;
+                for (let t of tasks) {
+                    if (t.t === "data" && t.p) {
+                        txDataBytes += Math.floor(t.p.length * 0.75);
+                    } else if (t.t === "connect") {
+                        txConnects++;
+                    }
+                }
+                if (txDataBytes > 0) {
+                    bytesTx += txDataBytes;
+                    addLog('⬆ [ОТДАЧА/TX] Отправлено на Render: ' + (txDataBytes > 1024 ? (txDataBytes/1024).toFixed(1) + ' KB' : txDataBytes + 'b'), '#33ccff');
+                } else if (txConnects > 0) {
+                    addLog('🔌 [CONNECT] Новое соединение (' + txConnects + ' шт) -> Render', '#ffcc00');
+                }
+
                 const b64Data = btoa(JSON.stringify(tasks));
                 const res = await sendBatchToServer(b64Data);
 
@@ -185,7 +231,8 @@ async function yandexTurboZeroLagEngine() {
                             if (item.data && item.data !== "EMPTY") {
                                 responseQueue.push(item);
                                 if (item.data !== "EOF") {
-                                    recvBytes += item.data.length;
+                                    let bSize = Math.floor(item.data.length * 0.75);
+                                    recvBytes += bSize;
                                 }
                             }
                             if (item.data === "EOF" || item.type === "close") {
@@ -195,20 +242,13 @@ async function yandexTurboZeroLagEngine() {
                             }
                             packetCount++;
                         }
-                        totalBytes += b64Data.length;
                         if (recvBytes > 0) {
-                            addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
-                            pollInterval = 0; // Нулевая задержка
+                            bytesRx += recvBytes;
+                            addLog('⚡ [ПРИЕМ/RX] Получено с Render: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
+                            pollInterval = 0;
                         } else {
                             pollInterval = 5;
                         }
-                        
-                        const bElem = document.getElementById('bytes');
-                        if (bElem) bElem.innerText = (totalBytes / 1024).toFixed(1) + " KB";
-                        const pkElem = document.getElementById('pk-count');
-                        if (pkElem) pkElem.innerText = packetCount;
-                        const sessElem = document.getElementById('sess-count');
-                        if (sessElem) sessElem.innerText = activeSessions.size;
                     } catch(jsonErr) {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
@@ -218,6 +258,7 @@ async function yandexTurboZeroLagEngine() {
             } else {
                 pollInterval = 40;
             }
+            updateTelemetryUI();
         } catch (e) { }
         await new Promise(r => setTimeout(r, pollInterval));
     }
@@ -316,36 +357,36 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v29.0 (Zero-Lag)</title>
+    <title>⚡ Yandex Relay Bridge v30.0 (Live Telemetry)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
         .header {{ display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid #1a2230; margin-bottom: 15px; }}
         h1 {{ font-size: 18px; color: #fff; font-weight: 600; }}
         h1 span {{ color: #00ff66; font-size: 13px; font-weight: normal; margin-left: 8px; }}
-        .grid {{ display: grid; grid-template-columns: 1fr 320px; gap: 15px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 340px; gap: 15px; }}
         @media(max-width: 800px) {{ .grid {{ grid-template-columns: 1fr; }} }}
-        #log {{ background: #020305; border: 1px solid #161e2b; height: 500px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; }}
+        #log {{ background: #020305; border: 1px solid #161e2b; height: 520px; overflow-y: auto; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border-radius: 6px; }}
         .card {{ background: #0e131d; border: 1px solid #1a2332; padding: 16px; border-radius: 6px; }}
-        .packet {{ border-bottom: 1px solid #141b27; padding: 4px 0; color: #8fa3bf; word-break: break-all; }}
+        .packet {{ border-bottom: 1px solid #141b27; padding: 4px 0; color: #8fa3bf; word-break: break-all; font-size: 11px; }}
         .packet b {{ color: #00ff66; }}
-        .packet .time {{ color: #506177; font-size: 11px; margin-right: 5px; }}
+        .packet .time {{ color: #506177; font-size: 10px; margin-right: 5px; }}
         .indicator {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #555; margin-right: 8px; }}
         .active {{ background: #00ff66; box-shadow: 0 0 8px #00ff66; }}
         .error {{ background: #ff3344; box-shadow: 0 0 8px #ff3344; }}
-        .stat {{ margin-bottom: 12px; font-size: 13px; color: #ccd6e0; display: flex; justify-content: space-between; }}
+        .stat {{ margin-bottom: 10px; font-size: 13px; color: #ccd6e0; display: flex; justify-content: space-between; }}
         .stat b {{ color: #00ff66; }}
+        .stat-tx b {{ color: #33ccff; }}
+        .stat-speed b {{ color: #ffcc00; }}
         button {{ background: #00ff66; color: #000; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: 700; width: 100%; margin-top: 8px; transition: 0.2s; }}
         button:hover {{ background: #00cc52; }}
     </style>
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Zero-Lag v29.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Telemetry v30.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
-
-    <a id="proxy_path" href="/api/batch" style="display:none"></a>
 
     <div class="grid">
         <div id="log"></div>
@@ -354,10 +395,13 @@ class YandexRenderBridgeServer:
                 <span><span id="ind-local" class="indicator"></span>Локальный клиент:</span>
                 <b id="st-local" style="color:#ff3344">ОФЛАЙН</b>
             </div>
-            <div class="stat"><span>Трафик туннеля:</span> <b id="bytes">0.0 KB</b></div>
+            <hr style="border:0; border-top:1px solid #1a2332; margin: 10px 0;">
+            <div class="stat stat-tx"><span>⬆ Отдано (Upload TX):</span> <b id="bytes-tx">0.0 KB</b></div>
+            <div class="stat"><span>⬇ Принято (Download RX):</span> <b id="bytes-rx">0.0 KB</b></div>
+            <div class="stat stat-speed"><span>⚡ Скорость в реальном времени:</span> <b id="speed-live">0.0 KB/s</b></div>
             <div class="stat"><span>Обработано пакетов:</span> <b id="pk-count">0</b></div>
             <div class="stat"><span>Активные сессии:</span> <b id="sess-count">0</b></div>
-            <hr style="border:0; border-top:1px solid #1a2332; margin: 15px 0;">
+            <hr style="border:0; border-top:1px solid #1a2332; margin: 12px 0;">
             <button onclick="testInternet()">🔍 ПРОВЕРИТЬ ВНЕШНИЙ IP СЕРВЕРА</button>
             <div id="test-res" style="margin-top:10px; font-size:12px; color:#8fa3bf; text-align:center;"></div>
         </div>
@@ -387,7 +431,7 @@ class YandexRenderBridgeServer:
             total = request.query.get("total")
             b64_payload = request.query.get("p", "")
 
-            # Сборка многосегментного микро-чанка
+            # Сборка микро-чанков
             if cid and idx is not None and total is not None:
                 idx = int(idx)
                 total = int(total)
@@ -582,6 +626,6 @@ if __name__ == "__main__":
     server = YandexRenderBridgeServer()
     app = server.create_app()
     logging.info(f"==================================================")
-    logging.info(f"🚀 RENDER BRIDGE SERVER v29.0 READY ON PORT {LISTEN_PORT}")
+    logging.info(f"🚀 RENDER BRIDGE SERVER v30.0 READY ON PORT {LISTEN_PORT}")
     logging.info(f"==================================================")
     web.run_app(app, host='0.0.0.0', port=LISTEN_PORT, access_log=None)
