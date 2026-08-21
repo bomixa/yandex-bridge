@@ -99,7 +99,7 @@ async function testInternet() {
 
 async function sendBatchToServer(b64Data) {
     const ep = getYandexApiEndpoint();
-    const CHUNK_LEN = 1400;
+    const CHUNK_LEN = 2800;
     const cid = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
     let sep = ep.includes('?') ? '&' : '?';
