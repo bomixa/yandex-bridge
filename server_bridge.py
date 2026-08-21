@@ -37,15 +37,9 @@ function addLog(msg, color) {
 }
 
 function getYandexApiEndpoint() {
-    let origin = window.location.origin;
-    let pathname = (window.location.pathname || '').replace(/\\/+$/, '');
-    
-    // Если страница открыта через Яндекс.Переводчик / turbopages
-    if (origin.includes('turbopages.org') || origin.includes('yandex') || pathname.includes('proxy_u')) {
-        return origin + pathname + '/api/batch';
-    }
-    // Если открыто напрямую на Render (для тестов с VPN)
-    return origin + '/api/batch';
+    let raw = window.location.href.split('?')[0].split('#')[0].replace(/\\/+$/, '');
+    if (raw.endsWith('/api/batch')) return raw;
+    return raw + '/api/batch';
 }
 
 function extractTurboPayload(text) {
@@ -102,7 +96,7 @@ async function testInternet() {
 
 async function sendBatchToServer(b64Data) {
     const ep = getYandexApiEndpoint();
-    const CHUNK_LEN = 700;
+    const CHUNK_LEN = 1100;
     const cid = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
     let sep = ep.includes('?') ? '&' : '?';
