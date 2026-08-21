@@ -620,10 +620,96 @@ class YandexRenderBridgeServer:
         if self.cleaner_task:
             self.cleaner_task.cancel()
 
+    async def handle_ws(self, request):
+        ws = web.WebSocketResponse(heartbeat=15.0, max_msg_size=10485760)
+        await ws.prepare(request)
+        logging.info("[+] [WS] Direct Client connected to Render!")
+        
+        ws_sessions = {}
+        
+        async def remote_reader(sid, r):
+            try:
+                while True:
+                    data = await r.read(65536)
+                    if not data:
+                        break
+                    frame = bytes([0x02]) + sid.encode('utf-8')[:8].ljust(8, b' ') + data
+                    if not ws.closed:
+                        await ws.send_bytes(frame)
+            except Exception:
+                pass
+            finally:
+                if sid in ws_sessions:
+                    try:
+                        ws_sessions[sid]['w'].close()
+                    except:
+                        pass
+                    del ws_sessions[sid]
+                if not ws.closed:
+                    frame = bytes([0x03]) + sid.encode('utf-8')[:8].ljust(8, b' ')
+                    await ws.send_bytes(frame)
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    raw = msg.data
+                    if len(raw) >= 9:
+                        cmd = raw[0]
+                        sid = raw[1:9].decode('utf-8', 'ignore').strip()
+                        payload = raw[9:]
+                        
+                        if cmd == 0x01: # CONNECT
+                            try:
+                                info = json.loads(payload.decode('utf-8', 'ignore'))
+                                addr = str(info['addr']).strip()
+                                port = int(info['port'])
+                                r, w = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout=6.0)
+                                sock = w.get_extra_info('socket')
+                                if sock:
+                                    try:
+                                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4194304)
+                                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4194304)
+                                    except:
+                                        pass
+                                ws_sessions[sid] = {'w': w, 'r': r}
+                                asyncio.create_task(remote_reader(sid, r))
+                            except Exception as e:
+                                logging.error(f"[WS] Connect fail {sid}: {e}")
+                                if not ws.closed:
+                                    await ws.send_bytes(bytes([0x03]) + sid.encode('utf-8')[:8].ljust(8, b' '))
+                                    
+                        elif cmd == 0x02: # DATA
+                            if sid in ws_sessions:
+                                try:
+                                    ws_sessions[sid]['w'].write(payload)
+                                    await ws_sessions[sid]['w'].drain()
+                                except Exception:
+                                    pass
+                                    
+                        elif cmd == 0x03: # CLOSE
+                            if sid in ws_sessions:
+                                try:
+                                    ws_sessions[sid]['w'].close()
+                                except:
+                                    pass
+                                del ws_sessions[sid]
+        finally:
+            for sid, s in list(ws_sessions.items()):
+                try:
+                    s['w'].close()
+                except:
+                    pass
+            ws_sessions.clear()
+            logging.info("[-] [WS] Direct Client disconnected from Render.")
+            
+        return ws
+
     def create_app(self):
         app = web.Application(client_max_size=50*1024*1024)
         app.router.add_get('/healthz', self.handle_ping)
         app.router.add_get('/api/ping', self.handle_ping)
+        app.router.add_get('/api/ws', self.handle_ws)
         app.router.add_route('*', '/api/ip', self.handle_get_ip)
         app.router.add_route('*', '/api/ip/{tail:.*}', self.handle_get_ip)
         app.router.add_route('*', '/api/batch', self.handle_batch)
