@@ -23,8 +23,6 @@ let responseQueue = [];
 let totalBytes = 0;
 let packetCount = 0;
 let activeSessions = new Set();
-let workingEndpoint = null;
-let chunkBuffers = {};
 
 function addLog(msg, color) {
     const log = document.getElementById('log');
@@ -38,23 +36,23 @@ function addLog(msg, color) {
     log.scrollTop = log.scrollHeight;
 }
 
-function getCandidateEndpoints() {
-    let list = [];
-    let p = (window.location.pathname || '').replace(/\\/+$/, '');
-    if (p.includes('proxy_u') || p.includes('turbopages.org') || window.location.hostname.includes('yandex') || window.location.hostname.includes('turbopages')) {
-        list.push(window.location.origin + p + '/api/batch');
-        list.push(window.location.pathname.replace(/\\/+$/, '') + '/api/batch');
+function getYandexApiEndpoint() {
+    let origin = window.location.origin;
+    let pathname = (window.location.pathname || '').replace(/\\/+$/, '');
+    
+    // Если страница открыта через Яндекс.Переводчик / turbopages
+    if (origin.includes('turbopages.org') || origin.includes('yandex') || pathname.includes('proxy_u')) {
+        return origin + pathname + '/api/batch';
     }
-    list.push('https://yandex-bridge-dlc6.onrender.com/api/batch');
-    list.push('/api/batch');
-    return Array.from(new Set(list));
+    // Если открыто напрямую на Render (для тестов с VPN)
+    return origin + '/api/batch';
 }
 
 function extractTurboPayload(text) {
     if (!text || typeof text !== 'string') return "";
     text = text.trim();
 
-    // 1. Поиск в meta-теге (устойчив к перестановке атрибутов)
+    // 1. Поиск в meta-теге (устойчив к перестановке атрибутов Яндексом)
     let m = text.match(/name=["']turbo_payload["']\\s+content=["']([^"']+)["']/i) || 
             text.match(/content=["']([^"']+)["']\\s+name=["']turbo_payload["']/i);
     if (m && m[1]) return m[1].trim();
@@ -71,7 +69,7 @@ function extractTurboPayload(text) {
     let mDiv = text.match(/<div[^>]*id=["']turbo_div["'][^>]*>([\\s\\S]*?)<\\/div>/i);
     if (mDiv && mDiv[1]) return mDiv[1].trim();
 
-    // 5. Прямой Base64 (если сервер вернул чистый base64)
+    // 5. Прямой Base64
     if (!text.includes('<html') && !text.includes('<body') && text.length > 1) {
         return text;
     }
@@ -83,82 +81,73 @@ async function testInternet() {
     if (res) res.innerHTML = "Проверка IP...";
     addLog("🔍 Проверка внешнего IP сервера...", "#00ff66");
     
-    const endpoints = getCandidateEndpoints();
-    for (let ep of endpoints) {
-        let ipUrl = ep.replace('/api/batch', '/api/ip');
-        let sep = ipUrl.includes('?') ? '&' : '?';
-        try {
-            const r = await fetch(ipUrl + sep + 't=' + Date.now(), { priority: 'high' });
-            if (r && r.ok) {
-                const text = await r.text();
-                let b64 = extractTurboPayload(text);
-                if (b64) {
-                    const data = JSON.parse(atob(b64));
-                    addLog("✓ [IP СЕРВЕРА] " + data.ip + " (" + (data.country || 'Cloud') + ")", "#00ff66");
-                    if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
-                    return;
-                }
+    const ep = getYandexApiEndpoint();
+    let ipUrl = ep.replace('/api/batch', '/api/ip');
+    let sep = ipUrl.includes('?') ? '&' : '?';
+    try {
+        const r = await fetch(ipUrl + sep + 't=' + Date.now(), { priority: 'high' });
+        if (r && r.ok) {
+            const text = await r.text();
+            let b64 = extractTurboPayload(text);
+            if (b64) {
+                const data = JSON.parse(atob(b64));
+                addLog("✓ [IP СЕРВЕРА] " + data.ip + " (" + (data.country || 'Cloud') + ")", "#00ff66");
+                if (res) res.innerHTML = '<span style="color:#00ff66">✓ IP Render: <b>' + data.ip + '</b></span>';
+                return;
             }
-        } catch(e) { }
-    }
+        }
+    } catch(e) { }
     if (res) res.innerHTML = '<span style="color:#ff3344">✗ Ошибка получения IP</span>';
 }
 
 async function sendBatchToServer(b64Data) {
-    const endpoints = getCandidateEndpoints();
-    let lastError = "";
-
+    const ep = getYandexApiEndpoint();
     const CHUNK_LEN = 700;
     const cid = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
+    let sep = ep.includes('?') ? '&' : '?';
 
-    for (let ep of endpoints) {
-        try {
-            let finalPayload = "";
-            let sep = ep.includes('?') ? '&' : '?';
-
-            if (totalChunks <= 1) {
-                let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
-                const resp = await fetch(targetUrl, { priority: 'high' });
-                if (resp && resp.ok) {
-                    const text = await resp.text();
-                    finalPayload = extractTurboPayload(text);
-                } else if (resp) {
-                    lastError = "HTTP " + resp.status;
-                }
-            } else {
-                for (let i = 0; i < totalChunks; i++) {
-                    let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
-                    let targetUrl = ep + sep + 'cid=' + cid + '&idx=' + i + '&total=' + totalChunks + '&p=' + encodeURIComponent(slice) + '&t=' + Date.now();
-                    const resp = await fetch(targetUrl, { priority: 'high' });
-                    if (resp && resp.ok) {
-                        const text = await resp.text();
-                        if (i === totalChunks - 1) {
-                            finalPayload = extractTurboPayload(text);
-                        }
-                    } else if (resp) {
-                        lastError = "HTTP " + resp.status;
-                        break;
+    try {
+        if (totalChunks <= 1) {
+            let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
+            const resp = await fetch(targetUrl, { priority: 'high' });
+            if (resp && resp.ok) {
+                const text = await resp.text();
+                let payload = extractTurboPayload(text);
+                if (payload) return { ok: true, payload: payload };
+            }
+        } else {
+            // Параллельная отправка всех микро-чанков одновременно (Zero Lag)
+            let fetchPromises = [];
+            for (let i = 0; i < totalChunks; i++) {
+                let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
+                let targetUrl = ep + sep + 'cid=' + cid + '&idx=' + i + '&total=' + totalChunks + '&p=' + encodeURIComponent(slice) + '&t=' + Date.now();
+                fetchPromises.push(
+                    fetch(targetUrl, { priority: 'high' }).then(r => r.ok ? r.text() : "")
+                );
+            }
+            const responses = await Promise.all(fetchPromises);
+            for (let text of responses) {
+                if (text) {
+                    let payload = extractTurboPayload(text);
+                    if (payload && payload !== "W10=") { // Игнорируем пустой base64 "[]"
+                        return { ok: true, payload: payload };
                     }
                 }
             }
-
-            if (finalPayload) {
-                return { ok: true, payload: finalPayload };
-            }
-        } catch (getErr) {
-            lastError = getErr.message;
         }
+    } catch (err) {
+        return { ok: false, error: err.message };
     }
-    return { ok: false, error: lastError || "Ошибка связи" };
+    return { ok: false, error: "Нет ответа" };
 }
 
-async function yandexMicroChunkEngine() {
+async function yandexTurboZeroLagEngine() {
     const indLocal = document.getElementById('ind-local');
     const stLocal = document.getElementById('st-local');
-    let pollInterval = 10;
+    let pollInterval = 5;
 
-    addLog("🚀 Яндекс.Транслятор v28.0 (Micro-Chunk Safe Transport) запущен.", "#00ff66");
+    addLog("🚀 Яндекс.Транслятор v29.0 (Zero-Lag Parallel Chunks) запущен.", "#00ff66");
 
     while (true) {
         try {
@@ -184,7 +173,7 @@ async function yandexMicroChunkEngine() {
 
             if (indLocal) indLocal.className = 'indicator active';
             if (stLocal) {
-                stLocal.innerText = "ПОДКЛЮЧЕН (YANDEX-SAFE)";
+                stLocal.innerText = "ПОДКЛЮЧЕН (ZERO-LAG)";
                 stLocal.style.color = "#00ff66";
             }
 
@@ -215,9 +204,9 @@ async function yandexMicroChunkEngine() {
                         totalBytes += b64Data.length;
                         if (recvBytes > 0) {
                             addLog('⚡ Получено: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
-                            pollInterval = 0;
+                            pollInterval = 0; // Нулевая задержка
                         } else {
-                            pollInterval = 10;
+                            pollInterval = 5;
                         }
                         
                         const bElem = document.getElementById('bytes');
@@ -230,17 +219,17 @@ async function yandexMicroChunkEngine() {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    pollInterval = 25;
+                    pollInterval = 10;
                 }
             } else {
-                pollInterval = 60;
+                pollInterval = 40;
             }
         } catch (e) { }
         await new Promise(r => setTimeout(r, pollInterval));
     }
 }
 
-yandexMicroChunkEngine();
+yandexTurboZeroLagEngine();
 """
 
 JS_BASE64 = base64.b64encode(JS_ENGINE_CODE.strip().encode('utf-8')).decode('utf-8')
@@ -333,7 +322,7 @@ class YandexRenderBridgeServer:
     <meta name="yandex" content="notranslate">
     <meta name="robots" content="noindex, nofollow, notranslate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Yandex Relay Bridge v28.0 (Micro-Chunk Safe)</title>
+    <title>⚡ Yandex Relay Bridge v29.0 (Zero-Lag)</title>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{ font-family: 'Segoe UI', Tahoma, monospace, sans-serif; background: #06080c; color: #00ff66; padding: 15px; }}
@@ -358,7 +347,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Micro-Chunk v28.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[Zero-Lag v29.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
@@ -404,20 +393,22 @@ class YandexRenderBridgeServer:
             total = request.query.get("total")
             b64_payload = request.query.get("p", "")
 
+            # Сборка многосегментного микро-чанка
             if cid and idx is not None and total is not None:
                 idx = int(idx)
                 total = int(total)
-                if cid not in self.chunk_assembler:
-                    self.chunk_assembler[cid] = {'chunks': {}, 'total': total, 'time': time.time()}
-                self.chunk_assembler[cid]['chunks'][idx] = b64_payload
+                async with self.get_lock():
+                    if cid not in self.chunk_assembler:
+                        self.chunk_assembler[cid] = {'chunks': {}, 'total': total, 'time': time.time()}
+                    self.chunk_assembler[cid]['chunks'][idx] = b64_payload
 
-                if len(self.chunk_assembler[cid]['chunks']) == total:
-                    full_p = "".join(self.chunk_assembler[cid]['chunks'][i] for i in range(total))
-                    del self.chunk_assembler[cid]
-                    b64_payload = full_p
-                else:
-                    res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
-                    return web.Response(text=res_html, content_type='text/html', headers=cors)
+                    if len(self.chunk_assembler[cid]['chunks']) == total:
+                        full_p = "".join(self.chunk_assembler[cid]['chunks'][i] for i in range(total))
+                        del self.chunk_assembler[cid]
+                        b64_payload = full_p
+                    else:
+                        res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
+                        return web.Response(text=res_html, content_type='text/html', headers=cors)
 
             if not b64_payload:
                 res_html = self.format_turbo_response(base64.b64encode(b"[]").decode())
@@ -597,6 +588,6 @@ if __name__ == "__main__":
     server = YandexRenderBridgeServer()
     app = server.create_app()
     logging.info(f"==================================================")
-    logging.info(f"🚀 RENDER BRIDGE SERVER v28.0 READY ON PORT {LISTEN_PORT}")
+    logging.info(f"🚀 RENDER BRIDGE SERVER v29.0 READY ON PORT {LISTEN_PORT}")
     logging.info(f"==================================================")
     web.run_app(app, host='0.0.0.0', port=LISTEN_PORT, access_log=None)
