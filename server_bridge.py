@@ -99,7 +99,7 @@ async function testInternet() {
 
 async function sendBatchToServer(b64Data) {
     const ep = getYandexApiEndpoint();
-    const CHUNK_LEN = 1100;
+    const CHUNK_LEN = 1400;
     const cid = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(b64Data.length / CHUNK_LEN);
     let sep = ep.includes('?') ? '&' : '?';
@@ -108,29 +108,37 @@ async function sendBatchToServer(b64Data) {
         if (totalChunks <= 1) {
             let targetUrl = ep + sep + 'p=' + encodeURIComponent(b64Data) + '&t=' + Date.now();
             const resp = await fetch(targetUrl, { priority: 'high' });
-            if (resp && resp.ok) {
-                const text = await resp.text();
-                let payload = extractTurboPayload(text);
-                if (payload) return { ok: true, payload: payload };
+            if (resp) {
+                if (resp.status === 429) {
+                    addLog('⏳ [429] Шлюз перегружен, пауза 1 сек...', '#ffaa00');
+                    await new Promise(r => setTimeout(r, 1000));
+                    return { ok: false };
+                }
+                if (resp.ok) {
+                    const text = await resp.text();
+                    let payload = extractTurboPayload(text);
+                    if (payload) return { ok: true, payload: payload };
+                }
             }
         } else {
-            let fetchPromises = [];
+            // Последовательная отправка чанков с паузой 20мс для исключения 429
+            let lastPayload = "";
             for (let i = 0; i < totalChunks; i++) {
                 let slice = b64Data.substr(i * CHUNK_LEN, CHUNK_LEN);
                 let targetUrl = ep + sep + 'cid=' + cid + '&idx=' + i + '&total=' + totalChunks + '&p=' + encodeURIComponent(slice) + '&t=' + Date.now();
-                fetchPromises.push(
-                    fetch(targetUrl, { priority: 'high' }).then(r => r.ok ? r.text() : "")
-                );
-            }
-            const responses = await Promise.all(fetchPromises);
-            for (let text of responses) {
-                if (text) {
+                const resp = await fetch(targetUrl, { priority: 'high' });
+                if (resp && resp.ok) {
+                    const text = await resp.text();
                     let payload = extractTurboPayload(text);
                     if (payload && payload !== "W10=") {
-                        return { ok: true, payload: payload };
+                        lastPayload = payload;
                     }
                 }
+                if (i < totalChunks - 1) {
+                    await new Promise(r => setTimeout(r, 20));
+                }
             }
+            if (lastPayload) return { ok: true, payload: lastPayload };
         }
     } catch (err) {
         return { ok: false, error: err.message };
