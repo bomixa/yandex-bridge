@@ -247,16 +247,16 @@ async function yandexTurboZeroLagEngine() {
                             addLog('⚡ [ПРИЕМ/RX] Получено с Render: ' + (recvBytes > 1024 ? (recvBytes/1024).toFixed(1) + ' KB' : recvBytes + 'b'), '#00ff66');
                             pollInterval = 0;
                         } else {
-                            pollInterval = 5;
+                            pollInterval = 10;
                         }
                     } catch(jsonErr) {
                         addLog('❌ Ошибка JSON: ' + jsonErr.message, '#ff3344');
                     }
                 } else {
-                    pollInterval = 10;
+                    pollInterval = 20;
                 }
             } else {
-                pollInterval = 40;
+                pollInterval = 300; // Режим сна при отсутствии сетевых действий
             }
             updateTelemetryUI();
         } catch (e) { }
