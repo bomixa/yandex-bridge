@@ -392,7 +392,7 @@ class YandexRenderBridgeServer:
 </head>
 <body translate="no" class="notranslate">
     <div class="header">
-        <h1>⚡ RENDER CLOUD TUNNEL <span>[Telemetry v30.0]</span></h1>
+        <h1>⚡ RENDER CLOUD TUNNEL <span>[SUPER-TURBO v38.0]</span></h1>
         <div style="font-size: 12px; color: #00ff66;">● RENDER: ONLINE</div>
     </div>
 
