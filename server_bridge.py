@@ -480,7 +480,8 @@ class YandexRenderBridgeServer:
                 info = json.loads(base64.b64decode(payload).decode('utf-8', 'ignore'))
                 addr = str(info['addr']).strip(" \t\n\r\x00/\"'")
                 port = int(info['port'])
-                await self.open_connection(sid, addr, port)
+                # Запускаем подключение сокета в фоне (не блокируя ответ на батч)
+                asyncio.create_task(self.open_connection(sid, addr, port))
                 return {"sid": sid, "data": "EMPTY", "type": "connect"}
             except Exception as e:
                 logging.error(f"[{sid}] Connect error: {e}")
@@ -528,8 +529,8 @@ class YandexRenderBridgeServer:
     async def open_connection(self, sid, addr, port):
         try:
             r, w = await asyncio.wait_for(
-                asyncio.open_connection(addr, port, family=socket.AF_INET),
-                timeout=8.0
+                asyncio.open_connection(addr, port),
+                timeout=6.0
             )
             sock = w.get_extra_info('socket')
             if sock:
@@ -540,22 +541,26 @@ class YandexRenderBridgeServer:
                 except:
                     pass
 
-            self.sessions[sid] = {
-                'w': w,
-                'r': r,
-                'buffer': bytearray(),
-                'active': True,
-                'last_poll': time.time()
-            }
-            if sid in self.pending_buffers and self.pending_buffers[sid]:
-                w.write(self.pending_buffers[sid])
-                await w.drain()
-                self.total_bytes_rx += len(self.pending_buffers[sid])
-                del self.pending_buffers[sid]
+            async with self.get_lock():
+                self.sessions[sid] = {
+                    'w': w,
+                    'r': r,
+                    'buffer': bytearray(),
+                    'active': True,
+                    'last_poll': time.time()
+                }
+                if sid in self.pending_buffers and self.pending_buffers[sid]:
+                    w.write(self.pending_buffers[sid])
+                    await w.drain()
+                    self.total_bytes_rx += len(self.pending_buffers[sid])
+                    del self.pending_buffers[sid]
 
             asyncio.create_task(self.read_remote(sid, r))
         except Exception as e:
             logging.error(f"[-] [{sid}] Connect failed ({addr}:{port}): {e}")
+            async with self.get_lock():
+                if sid in self.pending_buffers:
+                    del self.pending_buffers[sid]
 
     async def read_remote(self, sid, reader):
         try:
