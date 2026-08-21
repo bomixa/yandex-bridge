@@ -185,7 +185,7 @@ async function yandexTurboZeroLagEngine() {
             const outgoing = responseQueue;
             responseQueue = [];
 
-            const localResp = await fetch('http://localhost:8888/exchange', {
+            const localResp = await fetch('http://127.0.0.1:8888/exchange', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(outgoing),
